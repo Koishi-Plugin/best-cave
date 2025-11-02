@@ -93,7 +93,7 @@ export class DataManager {
     const newCavesFromConflicts: CaveObject[] = conflictingCaves.map(cave => {
       maxId++;
       this.logger.info(`回声洞（${cave.id}）已转移至（${maxId}）`);
-      return { ...cave, maxId, status: 'active' };
+      return { ...cave, id: maxId, status: 'active' };
     });
     const finalCavesToUpsert = [...nonConflictingCaves, ...newCavesFromConflicts];
     if (finalCavesToUpsert.length > 0) await this.ctx.database.upsert('cave', finalCavesToUpsert);

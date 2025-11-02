@@ -4,6 +4,7 @@ import { NameManager } from './NameManager'
 import { DataManager } from './DataManager'
 import { PendManager } from './PendManager'
 import { HashManager, CaveHashObject } from './HashManager'
+import { AIManager, CaveMetaObject } from './AIManager'
 import * as utils from './Utils'
 
 export const name = 'best-cave'
@@ -58,6 +59,7 @@ declare module 'koishi' {
   interface Tables {
     cave: CaveObject;
     cave_hash: CaveHashObject;
+    cave_meta: CaveMetaObject;
   }
 }
 
@@ -79,6 +81,14 @@ export interface Config {
   secretAccessKey?: string;
   bucket?: string;
   publicUrl?: string;
+  enableAI: boolean;
+  aiEndpoint?: string;
+  aiApiKey?: string;
+  aiModel?: string;
+  AnalysePrompt?: string;
+  aiCheckPrompt?: string;
+  aiAnalyseSchema?: string;
+  aiCheckSchema?: string;
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -95,6 +105,53 @@ export const Config: Schema<Config> = Schema.intersect([
     textThreshold: Schema.number().min(0).max(100).step(0.01).default(90).description('文本相似度阈值 (%)'),
     imageThreshold: Schema.number().min(0).max(100).step(0.01).default(90).description('图片相似度阈值 (%)'),
   }).description('复核配置'),
+  Schema.object({
+    enableAI: Schema.boolean().default(false).description("启用 AI"),
+    aiEndpoint: Schema.string().description('端点 (Endpoint)').role('link').default('https://generativelanguage.googleapis.com/v1beta'),
+    aiApiKey: Schema.string().description('密钥 (Key)').role('secret'),
+    aiModel: Schema.string().description('模型').default('gemini-2.5-flash'),
+    AnalysePrompt: Schema.string().role('textarea').default(`你是一位内容分析专家。请分析我提供的内容，总结关键词，概括内容并进行评分。`).description('分析提示词 (Prompt)'),
+    aiAnalyseSchema: Schema.string().role('textarea').default(
+      `{
+        "type": "object",
+        "properties": {
+          "keywords": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "使用尽可能多的关键词准确形容内容"
+          },
+          "description": {
+            "type": "string",
+            "description": "概括或描述这部分内容"
+          },
+          "rating": {
+            "type": "integer",
+            "description": "对内容的综合质量进行评分",
+            "minimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": ["keywords", "description", "rating"]
+      }`
+    ).description('分析输出模式 (JSON Schema)'),
+    aiCheckPrompt: Schema.string().role('textarea').default(`你是一位内容查重专家。请判断我提供的"新内容"是否与"已有内容"重复或高度相似。`).description('查重提示词 (Prompt)'),
+    aiCheckSchema: Schema.string().role('textarea').default(
+      `{
+        "type": "object",
+        "properties": {
+          "duplicate": {
+            "type": "boolean",
+            "description": "新内容是否与已有内容重复"
+          },
+          "id": {
+            "type": "integer",
+            "description": "如果重复，此为第一个重复的已有内容的ID"
+          }
+        },
+        "required": ["duplicate"]
+      }`
+    ).description('查重输出模式 (JSON Schema)'),
+  }).description('模型配置'),
   Schema.object({
     localPath: Schema.string().description('文件映射路径'),
     enableS3: Schema.boolean().default(false).description("启用 S3 存储"),
@@ -127,6 +184,7 @@ export function apply(ctx: Context, config: Config) {
   const reviewManager = config.enablePend ? new PendManager(ctx, config, fileManager, logger, reusableIds) : null;
   const hashManager = config.enableSimilarity ? new HashManager(ctx, config, logger, fileManager) : null;
   const dataManager = config.enableIO ? new DataManager(ctx, config, fileManager, logger) : null;
+  const aiManager = config.enableAI ? new AIManager(ctx, config, logger, fileManager) : null;
 
   ctx.on('ready', async () => {
     try {
@@ -181,31 +239,34 @@ export function apply(ctx: Context, config: Config) {
           if (!reply) return "等待操作超时";
           sourceElements = h.parse(reply);
         }
-        // logger.info(`消息内容: \n${JSON.stringify(sourceElements, null, 2)}`); // Test
-        // logger.info(`完整会话: \n${JSON.stringify(session, null, 2)}`); // Test
+        // logger.info(`消息内容: \n${JSON.stringify(sourceElements, null, 2)}`); // 请勿删除此行
+        // logger.info(`完整会话: \n${JSON.stringify(session, null, 2)}`); // 请勿删除此行
         const newId = await utils.getNextCaveId(ctx, reusableIds);
         const creationTime = new Date();
-        const { finalElementsForDb, mediaToSave } = await utils.processMessageElements(sourceElements, newId, session, config, logger, creationTime);
-        // logger.info(`数据库元素: \n${JSON.stringify(finalElementsForDb, null, 2)}`); // Test
+        const { finalElementsForDb, mediaToSave } = await utils.processMessageElements(sourceElements, newId, session, creationTime);
+        // logger.info(`数据库元素: \n${JSON.stringify(finalElementsForDb, null, 2)}`); // 请勿删除此行
         if (finalElementsForDb.length === 0) return "无可添加内容";
-        const textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-        if (hashManager) {
-          const combinedText = finalElementsForDb
-            .filter(el => el.type === 'text' && typeof el.content === 'string').map(el => el.content).join(' ');
-          if (combinedText) {
-            const newSimhash = hashManager.generateTextSimhash(combinedText);
-            if (newSimhash) {
-                const existingTextHashes = await ctx.database.get('cave_hash', { type: 'simhash' });
-                for (const existing of existingTextHashes) {
-                  const similarity = hashManager.calculateSimilarity(newSimhash, existing.hash);
-                  if (similarity >= config.textThreshold) return `文本与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值`;
-                }
-                textHashesToStore.push({ hash: newSimhash, type: 'simhash' });
-            }
+        const hasMedia = mediaToSave.length > 0;
+        const downloadedMedia: { fileName: string, buffer: Buffer }[] = [];
+        if (hasMedia) {
+          for (const media of mediaToSave) {
+            const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 30000 }));
+            downloadedMedia.push({ fileName: media.fileName, buffer });
           }
         }
+        let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+        let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+        if (hashManager) {
+          const checkResult = await utils.performSimilarityChecks(ctx, config, hashManager, finalElementsForDb, downloadedMedia);
+          if (checkResult.duplicate) return checkResult.message;
+          textHashesToStore = checkResult.textHashesToStore;
+          imageHashesToStore = checkResult.imageHashesToStore;
+        }
+        if (aiManager) {
+          const duplicateResult = await aiManager.checkForDuplicates(finalElementsForDb, mediaToSave, downloadedMedia);
+          if (duplicateResult && duplicateResult.duplicate) return `内容与回声洞（${duplicateResult.id}）重复`;
+        }
         const userName = (config.enableName ? await profileManager.getNickname(session.userId) : null) || session.username;
-        const hasMedia = mediaToSave.length > 0;
         const needsReview = config.enablePend && session.channelId !== config.adminChannel?.split(':')[1];
         const initialStatus = hasMedia ? 'preload' : (needsReview ? 'pending' : 'active');
         const newCave = await ctx.database.create('cave', {
@@ -218,8 +279,9 @@ export function apply(ctx: Context, config: Config) {
           time: creationTime,
         });
         if (hasMedia) {
-          utils.handleFileUploads(ctx, config, fileManager, logger, reviewManager, newCave, mediaToSave, reusableIds, session, hashManager, textHashesToStore);
+          utils.handleFileUploads(ctx, config, fileManager, logger, reviewManager, newCave, downloadedMedia, reusableIds, session, hashManager, textHashesToStore, imageHashesToStore, aiManager);
         } else {
+          if (aiManager) await aiManager.analyzeAndStore(newCave);
           if (hashManager && textHashesToStore.length > 0) await ctx.database.upsert('cave_hash', textHashesToStore.map(h => ({ ...h, cave: newCave.id })));
           if (initialStatus === 'pending') reviewManager.sendForPend(newCave);
         }
@@ -310,4 +372,5 @@ export function apply(ctx: Context, config: Config) {
   if (dataManager) dataManager.registerCommands(cave);
   if (reviewManager) reviewManager.registerCommands(cave);
   if (hashManager) hashManager.registerCommands(cave);
+  if (aiManager) aiManager.registerCommands(cave);
 }

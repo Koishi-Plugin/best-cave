@@ -4,6 +4,7 @@ import { CaveObject, Config, StoredElement, ForwardNode } from './index';
 import { FileManager } from './FileManager';
 import { HashManager, CaveHashObject } from './HashManager';
 import { PendManager } from './PendManager';
+import { AIManager } from './AIManager';
 
 const mimeTypeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.webp': 'image/webp' };
 
@@ -148,6 +149,7 @@ export async function cleanupPendingDeletions(ctx: Context, fileManager: FileMan
     idsToDelete.forEach(id => reusableIds.add(id));
     await ctx.database.remove('cave', { id: { $in: idsToDelete } });
     await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
+    await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
   } catch (error) {
     logger.error('清理回声洞时发生错误:', error);
   }
@@ -203,7 +205,7 @@ export async function getNextCaveId(ctx: Context, reusableIds: Set<number>): Pro
  * @param creationTime 统一的创建时间戳，用于生成文件名。
  * @returns 包含数据库元素和待保存媒体列表的对象。
  */
-export async function processMessageElements(sourceElements: h[], newId: number, session: Session, config: Config, logger: Logger, creationTime: Date): Promise<{ finalElementsForDb: StoredElement[], mediaToSave: { sourceUrl: string, fileName: string }[] }> {
+export async function processMessageElements(sourceElements: h[], newId: number, session: Session, creationTime: Date): Promise<{ finalElementsForDb: StoredElement[], mediaToSave: { sourceUrl: string, fileName: string }[] }> {
   const mediaToSave: { sourceUrl: string, fileName: string }[] = [];
   let mediaIndex = 0;
   const typeMap = { 'img': 'image', 'image': 'image', 'video': 'video', 'audio': 'audio', 'file': 'file', 'text': 'text', 'at': 'at', 'forward': 'forward', 'reply': 'reply', 'face': 'face' };
@@ -288,45 +290,66 @@ export async function processMessageElements(sourceElements: h[], newId: number,
 }
 
 /**
- * @description 异步处理文件上传、查重和状态更新的后台任务。
+ * @description 执行文本 (Simhash) 和图片 (pHash) 相似度查重。
+ * @returns 一个对象，指示是否发现重复项；如果未发现，则返回生成的哈希。
+ */
+export async function performSimilarityChecks(ctx: Context, config: Config, hashManager: HashManager, finalElementsForDb: StoredElement[], downloadedMedia: { fileName: string, buffer: Buffer }[]): Promise<{
+  duplicate: boolean; message?: string; textHashesToStore?: Omit<CaveHashObject, 'cave'>[]; imageHashesToStore?: Omit<CaveHashObject, 'cave'>[];}> {
+  const textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+  const imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+  const combinedText = finalElementsForDb.filter(el => el.type === 'text' && typeof el.content === 'string').map(el => el.content).join(' ');
+  if (combinedText) {
+    const newSimhash = hashManager.generateTextSimhash(combinedText);
+    if (newSimhash) {
+      const existingTextHashes = await ctx.database.get('cave_hash', { type: 'simhash' });
+      for (const existing of existingTextHashes) {
+        const similarity = hashManager.calculateSimilarity(newSimhash, existing.hash);
+        if (similarity >= config.textThreshold) return { duplicate: true, message: `文本与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
+      }
+      textHashesToStore.push({ hash: newSimhash, type: 'simhash' });
+    }
+  }
+  if (downloadedMedia.length > 0) {
+    const allExistingImageHashes = await ctx.database.get('cave_hash', { type: 'phash' });
+    for (const media of downloadedMedia) {
+      if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
+        const imageHash = await hashManager.generatePHash(media.buffer, 256);
+        for (const existing of allExistingImageHashes) {
+          const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
+          if (similarity >= config.imageThreshold) return { duplicate: true, message: `图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
+        }
+        imageHashesToStore.push({ hash: imageHash, type: 'phash' });
+        allExistingImageHashes.push({ cave: 0, hash: imageHash, type: 'phash' });
+      }
+    }
+  }
+  return { duplicate: false, textHashesToStore, imageHashesToStore };
+}
+
+/**
+ * @description 异步处理文件上传和状态更新的后台任务。
  * @param ctx - Koishi 上下文。
  * @param config - 插件配置。
  * @param fileManager - FileManager 实例，用于保存文件。
  * @param logger - 日志记录器实例。
  * @param reviewManager - ReviewManager 实例，用于提交审核。
  * @param cave - 刚刚在数据库中创建的 `preload` 状态的回声洞对象。
- * @param mediaToSave - 需要下载和处理的媒体文件列表。
+ * @param downloadedMedia - 需要保存的媒体文件及其 Buffer。
  * @param reusableIds - 可复用 ID 的内存缓存。
  * @param session - 触发此操作的用户会话，用于发送反馈。
  * @param hashManager - HashManager 实例，如果启用则用于哈希计算和比较。
  * @param textHashesToStore - 已预先计算好的、待存入数据库的文本哈希对象数组。
+ * @param imageHashesToStore - 已预先计算好的、待存入数据库的图片哈希对象数组。
+ * @param aiManager - AIManager 实例，如果启用则用于 AI 分析。
  */
 export async function handleFileUploads(
-  ctx: Context, config: Config, fileManager: FileManager, logger: Logger,
-  reviewManager: PendManager, cave: CaveObject, mediaToToSave: { sourceUrl: string, fileName: string }[],
-  reusableIds: Set<number>, session: Session, hashManager: HashManager, textHashesToStore: Omit<CaveHashObject, 'cave'>[]
+  ctx: Context, config: Config, fileManager: FileManager, logger: Logger, reviewManager: PendManager,
+  cave: CaveObject, downloadedMedia: { fileName: string, buffer: Buffer }[], reusableIds: Set<number>,
+  session: Session, hashManager: HashManager, textHashesToStore: Omit<CaveHashObject, 'cave'>[],
+  imageHashesToStore: Omit<CaveHashObject, 'cave'>[], aiManager: AIManager | null
 ) {
   try {
-    const downloadedMedia: { fileName: string, buffer: Buffer }[] = [];
-    const imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-    const allExistingImageHashes = hashManager ? await ctx.database.get('cave_hash', { type: 'phash' }) : [];
-    for (const media of mediaToToSave) {
-      const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 30000 }));
-      downloadedMedia.push({ fileName: media.fileName, buffer });
-      if (hashManager && ['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
-        const imageHash = await hashManager.generatePHash(buffer, 256);
-        for (const existing of allExistingImageHashes) {
-          const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
-          if (similarity >= config.imageThreshold) {
-            await session.send(`图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值`);
-            await ctx.database.upsert('cave', [{ id: cave.id, status: 'delete' }]);
-            cleanupPendingDeletions(ctx, fileManager, logger, reusableIds);
-            return;
-          }
-        }
-        imageHashesToStore.push({ hash: imageHash, type: 'phash' });
-      }
-    }
+    if (aiManager) await aiManager.analyzeAndStore(cave, downloadedMedia);
     await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
     const needsReview = config.enablePend && session.channelId !== config.adminChannel?.split(':')[1];
     const finalStatus = needsReview ? 'pending' : 'active';
