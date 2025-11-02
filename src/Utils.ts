@@ -3,8 +3,6 @@ import * as path from 'path';
 import { CaveObject, Config, StoredElement, ForwardNode } from './index';
 import { FileManager } from './FileManager';
 import { HashManager, CaveHashObject } from './HashManager';
-import { PendManager } from './PendManager';
-import { AIManager } from './AIManager';
 
 const mimeTypeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.webp': 'image/webp' };
 
@@ -327,45 +325,32 @@ export async function performSimilarityChecks(ctx: Context, config: Config, hash
 }
 
 /**
- * @description 异步处理文件上传和状态更新的后台任务。
+ * @description 异步处理文件上传，并在成功后更新回声洞状态。
  * @param ctx - Koishi 上下文。
  * @param config - 插件配置。
  * @param fileManager - FileManager 实例，用于保存文件。
  * @param logger - 日志记录器实例。
- * @param reviewManager - ReviewManager 实例，用于提交审核。
  * @param cave - 刚刚在数据库中创建的 `preload` 状态的回声洞对象。
  * @param downloadedMedia - 需要保存的媒体文件及其 Buffer。
  * @param reusableIds - 可复用 ID 的内存缓存。
- * @param session - 触发此操作的用户会话，用于发送反馈。
- * @param hashManager - HashManager 实例，如果启用则用于哈希计算和比较。
- * @param textHashesToStore - 已预先计算好的、待存入数据库的文本哈希对象数组。
- * @param imageHashesToStore - 已预先计算好的、待存入数据库的图片哈希对象数组。
- * @param aiManager - AIManager 实例，如果启用则用于 AI 分析。
+ * @param session - 触发此操作的用户会话。
+ * @returns 成功则返回最终状态 ('pending' or 'active')，失败则返回 'delete'。
  */
 export async function handleFileUploads(
-  ctx: Context, config: Config, fileManager: FileManager, logger: Logger, reviewManager: PendManager,
-  cave: CaveObject, downloadedMedia: { fileName: string, buffer: Buffer }[], reusableIds: Set<number>,
-  session: Session, hashManager: HashManager, textHashesToStore: Omit<CaveHashObject, 'cave'>[],
-  imageHashesToStore: Omit<CaveHashObject, 'cave'>[], aiManager: AIManager | null
-) {
+  ctx: Context, config: Config, fileManager: FileManager, logger: Logger, cave: CaveObject,
+  downloadedMedia: { fileName: string, buffer: Buffer }[], reusableIds: Set<number>, session: Session
+): Promise<'pending' | 'active' | 'delete'> {
   try {
-    if (aiManager) await aiManager.analyzeAndStore(cave, downloadedMedia);
     await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
     const needsReview = config.enablePend && session.channelId !== config.adminChannel?.split(':')[1];
     const finalStatus = needsReview ? 'pending' : 'active';
     await ctx.database.upsert('cave', [{ id: cave.id, status: finalStatus }]);
-    if (hashManager) {
-      const allHashesToInsert = [...textHashesToStore, ...imageHashesToStore].map(h => ({ ...h, cave: cave.id }));
-      if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);
-    }
-    if (finalStatus === 'pending' && reviewManager) {
-      const [finalCave] = await ctx.database.get('cave', { id: cave.id });
-      if (finalCave) reviewManager.sendForPend(finalCave);
-    }
+    return finalStatus;
   } catch (fileProcessingError) {
     logger.error(`回声洞（${cave.id}）文件处理失败:`, fileProcessingError);
     await ctx.database.upsert('cave', [{ id: cave.id, status: 'delete' }]);
     cleanupPendingDeletions(ctx, fileManager, logger, reusableIds);
+    return 'delete';
   }
 }
 

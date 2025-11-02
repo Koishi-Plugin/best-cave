@@ -268,22 +268,25 @@ export function apply(ctx: Context, config: Config) {
         }
         const userName = (config.enableName ? await profileManager.getNickname(session.userId) : null) || session.username;
         const needsReview = config.enablePend && session.channelId !== config.adminChannel?.split(':')[1];
-        const initialStatus = hasMedia ? 'preload' : (needsReview ? 'pending' : 'active');
+        let finalStatus: CaveObject['status'] = hasMedia ? 'preload' : (needsReview ? 'pending' : 'active');
         const newCave = await ctx.database.create('cave', {
           id: newId,
           elements: finalElementsForDb,
           channelId: session.channelId,
           userId: session.userId,
           userName,
-          status: initialStatus,
+          status: finalStatus,
           time: creationTime,
         });
-        if (hasMedia) {
-          utils.handleFileUploads(ctx, config, fileManager, logger, reviewManager, newCave, downloadedMedia, reusableIds, session, hashManager, textHashesToStore, imageHashesToStore, aiManager);
-        } else {
-          if (aiManager) await aiManager.analyzeAndStore(newCave);
-          if (hashManager && textHashesToStore.length > 0) await ctx.database.upsert('cave_hash', textHashesToStore.map(h => ({ ...h, cave: newCave.id })));
-          if (initialStatus === 'pending') reviewManager.sendForPend(newCave);
+        if (hasMedia) finalStatus = await utils.handleFileUploads(ctx, config, fileManager, logger, newCave, downloadedMedia, reusableIds, session);
+        if (finalStatus !== 'preload' && finalStatus !== 'delete') {
+          newCave.status = finalStatus;
+          if (aiManager) await aiManager.analyzeAndStore(newCave, downloadedMedia);
+          if (hashManager) {
+            const allHashesToInsert = [...textHashesToStore, ...imageHashesToStore].map(h => ({ ...h, cave: newCave.id }));
+            if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);
+          }
+          if (finalStatus === 'pending' && reviewManager) reviewManager.sendForPend(newCave);
         }
         return needsReview
           ? `提交成功，序号为（${newCave.id}）`

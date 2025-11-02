@@ -217,9 +217,17 @@ export class AIManager {
     if (parts.length <= 1) return { payload: {} };
     try {
       const schema = JSON.parse(schemaString);
-      return { payload: { contents: [{ parts }], generationConfig: { response_schema: schema } } };
+      return {
+        payload: {
+          contents: [{ parts }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: schema,
+          },
+        },
+      };
     } catch (error) {
-      this.logger.error('解析JSON Schema失败:', error);
+      this.logger.error('分析 JSON Schema 解析失败:', error);
       return { payload: {} };
     }
   }
@@ -236,12 +244,20 @@ export class AIManager {
       new_content: { text: formatContent(newElements) },
       existing_contents: existingCaves.map(cave => ({ id: cave.id, text: formatContent(cave.elements) })),
     });
-    const fullPrompt = `${this.config.aiCheckPrompt}\n\n以下是需要处理的数据:\n${payloadContent}`;
+    const parts: any[] = [{ text: this.config.aiCheckPrompt }, { text: payloadContent }];
     try {
       const schema = JSON.parse(this.config.aiCheckSchema);
-      return { payload: { contents: [{ parts: [{ text: fullPrompt }] }], generationConfig: { response_schema: schema } } };
+      return {
+        payload: {
+          contents: [{ parts: parts }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: schema,
+          },
+        },
+      };
     } catch (error) {
-      this.logger.error('解析查重JSON Schema失败:', error);
+      this.logger.error('查重 JSON Schema 解析失败:', error);
       return { payload: {} };
     }
   }
@@ -253,6 +269,7 @@ export class AIManager {
    */
   private parseAnalysisResponse(response: any): Omit<CaveMetaObject, 'cave'> {
     try {
+      if (!response?.candidates?.[0]?.content?.parts?.[0]?.text) throw new Error('分析响应解析失败');
       const content = response.candidates[0].content.parts[0].text;
       const parsed = JSON.parse(content);
       const keywords = Array.isArray(parsed.keywords) ? parsed.keywords : [];
@@ -263,7 +280,7 @@ export class AIManager {
       };
     } catch (error) {
       this.logger.error('分析响应解析失败:', error, '原始响应:', JSON.stringify(response));
-      return { keywords: [], description: '解析失败', rating: 0 };
+      throw error;
     }
   }
 
@@ -274,6 +291,7 @@ export class AIManager {
    */
   private parseDedupeResponse(response: any): { duplicate: boolean; id?: number } {
     try {
+      if (!response?.candidates?.[0]?.content?.parts?.[0]?.text) throw new Error('查重响应解析失败');
       const content = response.candidates[0].content.parts[0].text;
       const parsed = JSON.parse(content);
       if (parsed.duplicate === true && parsed.id) return { duplicate: true, id: Number(parsed.id) };
@@ -281,7 +299,7 @@ export class AIManager {
     } catch (error)
     {
       this.logger.error('查重响应解析失败:', error, '原始响应:', JSON.stringify(response));
-      return { duplicate: false };
+      throw error;
     }
   }
 }
