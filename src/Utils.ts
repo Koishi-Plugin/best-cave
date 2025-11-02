@@ -368,3 +368,14 @@ export async function handleFileUploads(
     cleanupPendingDeletions(ctx, fileManager, logger, reusableIds);
   }
 }
+
+/**
+ * @description 校验会话是否来自指定的管理群组。
+ * @param session 当前会话。
+ * @param config 插件配置。
+ * @returns 如果校验不通过，返回错误信息字符串；如果通过，返回 null。
+ */
+export function requireAdmin(session: Session, config: Config): string | null {
+  if (session.cid !== config.adminChannel) return '此指令仅限在管理群组中使用';
+  return null;
+}

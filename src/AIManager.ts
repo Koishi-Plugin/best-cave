@@ -2,6 +2,7 @@ import { Context, Logger, h } from 'koishi';
 import { Config, CaveObject, StoredElement } from './index';
 import { FileManager } from './FileManager';
 import * as path from 'path';
+import { requireAdmin } from './Utils';
 
 /**
  * @description 数据库 `cave_meta` 表的完整对象模型。
@@ -59,7 +60,9 @@ export class AIManager {
     cave.subcommand('.ai', '分析回声洞', { hidden: true, authority: 4 })
       .usage('分析尚未分析的回声洞，补全回声洞记录。')
       .action(async ({ session }) => {
-        if (session.channelId !== this.config.adminChannel?.split(':')[1]) return '此指令仅限在管理群组中使用';
+        const adminError = requireAdmin(session, this.config);
+        if (adminError) return adminError;
+
         try {
           const allCaves = await this.ctx.database.get('cave', { status: 'active' });
           const analyzedCaveIds = new Set((await this.ctx.database.get('cave_meta', {})).map(meta => meta.cave));
@@ -125,7 +128,8 @@ export class AIManager {
       }
       if (potentialDuplicates.length === 0) return { duplicate: false };
       const { payload } = await this.prepareDedupePayload(newElements, potentialDuplicates);
-      const response = await this.http.post(`${this.config.aiEndpoint}:generateContent?key=${this.config.aiApiKey}`, payload, { headers: { 'Content-Type': 'application/json' }, timeout: 90000 });
+      const fullUrl = `${this.config.aiEndpoint}/models/${this.config.aiModel}:generateContent?key=${this.config.aiApiKey}`;
+      const response = await this.http.post(fullUrl, payload, { headers: { 'Content-Type': 'application/json' }, timeout: 90000 });
       return this.parseDedupeResponse(response);
     } catch (error) {
       this.logger.error('查重回声洞出错:', error);
@@ -145,6 +149,7 @@ export class AIManager {
       if (analysisResult) await this.ctx.database.upsert('cave_meta', [{ cave: cave.id, ...analysisResult }]);
     } catch (error) {
       this.logger.error(`分析回声洞（${cave.id}）失败:`, error);
+      throw error;
     }
   }
 
@@ -158,7 +163,8 @@ export class AIManager {
   private async getAnalysis(elements: StoredElement[], mediaToSave?: { sourceUrl: string, fileName: string }[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<Omit<CaveMetaObject, 'cave'>> {
     const { payload } = await this.preparePayload(this.config.AnalysePrompt, this.config.aiAnalyseSchema, elements, mediaToSave, mediaBuffers);
     if (!payload.contents) return null;
-    const response = await this.http.post(`${this.config.aiEndpoint}:generateContent?key=${this.config.aiApiKey}`, payload, { headers: { 'Content-Type': 'application/json' }, timeout: 60000 });
+    const fullUrl = `${this.config.aiEndpoint}/models/${this.config.aiModel}:generateContent?key=${this.config.aiApiKey}`;
+    const response = await this.http.post(fullUrl, payload, { headers: { 'Content-Type': 'application/json' }, timeout: 60000 });
     return this.parseAnalysisResponse(response);
   }
 
@@ -247,7 +253,7 @@ export class AIManager {
    */
   private parseAnalysisResponse(response: any): Omit<CaveMetaObject, 'cave'> {
     try {
-      const content = response.candidates.content.parts.text;
+      const content = response.candidates[0].content.parts[0].text;
       const parsed = JSON.parse(content);
       const keywords = Array.isArray(parsed.keywords) ? parsed.keywords : [];
       return {
@@ -268,11 +274,12 @@ export class AIManager {
    */
   private parseDedupeResponse(response: any): { duplicate: boolean; id?: number } {
     try {
-      const content = response.candidates.content.parts.text;
+      const content = response.candidates[0].content.parts[0].text;
       const parsed = JSON.parse(content);
       if (parsed.duplicate === true && parsed.id) return { duplicate: true, id: Number(parsed.id) };
       return { duplicate: false };
-    } catch (error) {
+    } catch (error)
+    {
       this.logger.error('查重响应解析失败:', error, '原始响应:', JSON.stringify(response));
       return { duplicate: false };
     }

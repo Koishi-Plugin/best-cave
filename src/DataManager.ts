@@ -1,6 +1,7 @@
 import { Context, Logger } from 'koishi';
 import { FileManager } from './FileManager';
 import { CaveObject, Config } from './index';
+import { requireAdmin } from './Utils';
 
 /**
  * @class DataManager
@@ -26,8 +27,10 @@ export class DataManager {
    * @param cave - 主 `cave` 命令实例。
    */
   public registerCommands(cave) {
-    const requireAdmin = (action: () => Promise<string>) => async ({ session }) => {
-      if (session.channelId !== this.config.adminChannel?.split(':')[1]) return '此指令仅限在管理群组中使用';
+    const commandAction = (action: () => Promise<string>) => async ({ session }) => {
+      const adminError = requireAdmin(session, this.config);
+      if (adminError) return adminError;
+
       try {
         await session.send('正在处理，请稍候...');
         return await action();
@@ -39,10 +42,10 @@ export class DataManager {
 
     cave.subcommand('.export', '导出回声洞数据', { hidden: true , authority: 4 })
       .usage('将所有回声洞数据导出到 cave.json 中。')
-      .action(requireAdmin(() => this.exportData()));
+      .action(commandAction(() => this.exportData()));
     cave.subcommand('.import', '导入回声洞数据', { hidden: true , authority: 4 })
       .usage('从 cave.json 中导入回声洞数据。')
-      .action(requireAdmin(() => this.importData()));
+      .action(commandAction(() => this.importData()));
   }
 
   /**

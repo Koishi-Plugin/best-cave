@@ -1,7 +1,7 @@
 import { Context, h, Logger } from 'koishi';
 import { CaveObject, Config } from './index';
 import { FileManager } from './FileManager';
-import { buildCaveMessage, cleanupPendingDeletions } from './Utils';
+import { buildCaveMessage, cleanupPendingDeletions, requireAdmin } from './Utils';
 
 /**
  * @class PendManager
@@ -28,14 +28,10 @@ export class PendManager {
    * @param cave - 主 `cave` 命令实例。
    */
   public registerCommands(cave) {
-    const requireAdmin = (session) => {
-      if (session.channelId !== this.config.adminChannel?.split(':')[1]) return '此指令仅限在管理群组中使用';
-      return null;
-    };
     const pend = cave.subcommand('.pend [id:posint]', '审核回声洞', { hidden: true })
       .usage('查询待审核的回声洞列表，或指定 ID 查看对应待审核的回声洞。')
       .action(async ({ session }, id) => {
-        const adminError = requireAdmin(session);
+        const adminError = requireAdmin(session, this.config);
         if (adminError) return adminError;
         if (id) {
           const [targetCave] = await this.ctx.database.get('cave', { id });
@@ -50,7 +46,7 @@ export class PendManager {
         return `当前共有 ${pendingCaves.length} 条待审核回声洞，序号为：\n${pendingCaves.map(c => c.id).join('|')}`;
       });
     const createPendAction = (actionType: 'approve' | 'reject') => async ({ session }, ...ids: number[]) => {
-      const adminError = requireAdmin(session);
+      const adminError = requireAdmin(session, this.config);
       if (adminError) return adminError;
       let idsToProcess = ids;
       if (idsToProcess.length === 0) {
