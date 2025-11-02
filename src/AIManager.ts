@@ -59,7 +59,7 @@ export class AIManager {
     cave.subcommand('.ai', '分析回声洞', { hidden: true, authority: 4 })
       .usage('分析尚未分析的回声洞，补全回声洞记录。')
       .action(async ({ session }) => {
-        if (session.channelId !== this.config.adminChannel?.split(':')) return '此指令仅限在管理群组中使用';
+        if (session.channelId !== this.config.adminChannel?.split(':')[1]) return '此指令仅限在管理群组中使用';
         try {
           const allCaves = await this.ctx.database.get('cave', { status: 'active' });
           const analyzedCaveIds = new Set((await this.ctx.database.get('cave_meta', {})).map(meta => meta.cave));
