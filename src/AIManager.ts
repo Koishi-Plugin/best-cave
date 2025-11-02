@@ -31,6 +31,8 @@ declare module 'koishi' {
  */
 export class AIManager {
   private http;
+  private requestCount = 0;
+  private rateLimitResetTime = 0;
 
   /**
    * @constructor
@@ -69,21 +71,18 @@ export class AIManager {
           if (cavesToAnalyze.length === 0) return '无需分析回声洞';
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
-          const batchSize = 100;
-          for (let i = 0; i < cavesToAnalyze.length; i += batchSize) {
-            const batch = cavesToAnalyze.slice(i, i + batchSize);
-            this.logger.info(`[${i}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 条回声洞...`);
-            for (const cave of batch) {
-              try {
-                await this.analyzeAndStore(cave);
-                successCount++;
-              } catch (error) {
-                this.logger.error(`分析回声洞（${cave.id}）时出错:`, error);
-                return `分析回声洞（${cave.id}）时出错: ${error.message}`;
-              }
+          let failedCount = 0;
+          for (const [index, cave] of cavesToAnalyze.entries()) {
+            this.logger.info(`[${index + 1}/${cavesToAnalyze.length}] 正在分析回声洞 (${cave.id})...`);
+            try {
+              await this.analyzeAndStore(cave);
+              successCount++;
+            } catch (error) {
+              failedCount++;
+              this.logger.error(`分析回声洞（${cave.id}）时出错:`, error);
             }
           }
-          return `已分析 ${successCount} 个回声洞`;
+          return `已分析 ${successCount} 个回声洞（失败 ${failedCount} 个）`;
         } catch (error) {
           this.logger.error('分析回声洞失败:', error);
           return `操作失败: ${error.message}`;
@@ -228,6 +227,17 @@ export class AIManager {
    * @throws {Error} 当 JSON Schema 解析失败、网络请求失败或 AI 返回错误时，抛出异常。
    */
   private async requestAI(messages: any[], systemPrompt: string, schemaString: string): Promise<any> {
+    const now = Date.now();
+    if (now > this.rateLimitResetTime) {
+      this.rateLimitResetTime = now + 60000;
+      this.requestCount = 0;
+    }
+    if (this.requestCount >= this.config.aiTPM) {
+      const delay = this.rateLimitResetTime - now;
+      await new Promise(resolve => setTimeout(resolve, delay));
+      this.rateLimitResetTime = Date.now() + 60000;
+      this.requestCount = 0;
+    }
     let schema = JSON.parse(schemaString);
     const payload = {
       model: this.config.aiModel,
@@ -240,6 +250,7 @@ export class AIManager {
       'Authorization': `Bearer ${this.config.aiApiKey}`
     };
     try {
+      this.requestCount++;
       const response = await this.http.post(fullUrl, payload, { headers, timeout: 90000 });
       return JSON.parse(response.choices[0].message.content);
     } catch (error) {
