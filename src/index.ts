@@ -273,7 +273,8 @@ export function apply(ctx: Context, config: Config) {
         let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
         let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
         if (hashManager) {
-          const checkResult = await utils.performSimilarityChecks(ctx, config, hashManager, finalElementsForDb, downloadedMedia);
+          for (const media of downloadedMedia) media.buffer = hashManager.sanitizeImageBuffer(media.buffer);
+          const checkResult = await utils.performSimilarityChecks(ctx, config, hashManager, logger, finalElementsForDb, downloadedMedia);
           if (checkResult.duplicate) return checkResult.message;
           textHashesToStore = checkResult.textHashesToStore;
           imageHashesToStore = checkResult.imageHashesToStore;
@@ -283,7 +284,7 @@ export function apply(ctx: Context, config: Config) {
           if (duplicateResult && duplicateResult.duplicate) return `内容与回声洞（${duplicateResult.id}）重复`;
         }
         const userName = (config.enableName ? await profileManager.getNickname(session.userId) : null) || session.username;
-        const needsReview = config.enablePend && session.channelId !== config.adminChannel?.split(':')[1];
+        const needsReview = config.enablePend && session.cid !== config.adminChannel;
         let finalStatus: CaveObject['status'] = hasMedia ? 'preload' : (needsReview ? 'pending' : 'active');
         const newCave = await ctx.database.create('cave', {
           id: newId,
@@ -294,7 +295,7 @@ export function apply(ctx: Context, config: Config) {
           status: finalStatus,
           time: creationTime,
         });
-        if (hasMedia) finalStatus = await utils.handleFileUploads(ctx, config, fileManager, logger, newCave, downloadedMedia, reusableIds, session);
+        if (hasMedia) finalStatus = await utils.handleFileUploads(ctx, config, fileManager, logger, newCave, downloadedMedia, reusableIds, needsReview);
         if (finalStatus !== 'preload') {
           newCave.status = finalStatus;
           if (aiManager) await aiManager.analyzeAndStore(newCave, downloadedMedia);
@@ -334,7 +335,7 @@ export function apply(ctx: Context, config: Config) {
         const [targetCave] = await ctx.database.get('cave', { id, status: 'active' });
         if (!targetCave) return `回声洞（${id}）不存在`;
         const isAuthor = targetCave.userId === session.userId;
-        const isAdmin = session.channelId === config.adminChannel?.split(':')[1];
+        const isAdmin = session.cid === config.adminChannel;
         if (!isAuthor && !isAdmin) return '你没有权限删除这条回声洞';
         await ctx.database.upsert('cave', [{ id, status: 'delete' }]);
         const caveMessages = await utils.buildCaveMessage(targetCave, config, fileManager, logger, session.platform, '已删除');
@@ -351,8 +352,8 @@ export function apply(ctx: Context, config: Config) {
     .option('all', '-a 查看排行')
     .action(async ({ session, options }) => {
       if (options.all) {
-        const adminChannelId = config.adminChannel?.split(':')[1];
-        if (session.channelId !== adminChannelId) return '此指令仅限在管理群组中使用';
+        const adminError = utils.requireAdmin(session, config);
+        if (adminError) return adminError;
         try {
           const aggregatedStats = await ctx.database.select('cave', { status: 'active' })
             .groupBy(['userId', 'userName'], { count: row => $.count(row.id) }).execute();

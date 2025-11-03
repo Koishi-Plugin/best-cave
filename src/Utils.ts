@@ -17,7 +17,6 @@ const mimeTypeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image
  * @returns 包含多条消息的数组，每条消息是一个 (string | h)[] 数组。
  */
 export async function buildCaveMessage(cave: CaveObject, config: Config, fileManager: FileManager, logger: Logger, platform?: string, prefix?: string): Promise<(string | h)[][]> {
-  // 递归地将 StoredElement 数组转换为 h() 元素数组
   async function transformToH(elements: StoredElement[]): Promise<h[]> {
     return Promise.all(elements.map(async (el): Promise<h | h[]> => {
       if (el.type === 'text') return h.text(el.content as string);
@@ -50,7 +49,6 @@ export async function buildCaveMessage(cave: CaveObject, config: Config, fileMan
           return h.text('[合并转发]');
         }
       }
-      // 处理媒体元素
       if (['image', 'video', 'audio', 'file'].includes(el.type)) {
         const fileName = el.file;
         if (!fileName) return h('p', {}, `[${el.type}]`);
@@ -291,37 +289,42 @@ export async function processMessageElements(sourceElements: h[], newId: number,
  * @description 执行文本 (Simhash) 和图片 (pHash) 相似度查重。
  * @returns 一个对象，指示是否发现重复项；如果未发现，则返回生成的哈希。
  */
-export async function performSimilarityChecks(ctx: Context, config: Config, hashManager: HashManager, finalElementsForDb: StoredElement[], downloadedMedia: { fileName: string, buffer: Buffer }[]): Promise<{
+export async function performSimilarityChecks(ctx: Context, config: Config, hashManager: HashManager, logger: Logger, finalElementsForDb: StoredElement[], downloadedMedia: { fileName: string, buffer: Buffer }[]): Promise<{
   duplicate: boolean; message?: string; textHashesToStore?: Omit<CaveHashObject, 'cave'>[]; imageHashesToStore?: Omit<CaveHashObject, 'cave'>[];}> {
-  const textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-  const imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-  const combinedText = finalElementsForDb.filter(el => el.type === 'text' && typeof el.content === 'string').map(el => el.content).join(' ');
-  if (combinedText) {
-    const newSimhash = hashManager.generateTextSimhash(combinedText);
-    if (newSimhash) {
-      const existingTextHashes = await ctx.database.get('cave_hash', { type: 'text' });
-      for (const existing of existingTextHashes) {
-        const similarity = hashManager.calculateSimilarity(newSimhash, existing.hash);
-        if (similarity >= config.textThreshold) return { duplicate: true, message: `文本与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
-      }
-      textHashesToStore.push({ hash: newSimhash, type: 'text' });
-    }
-  }
-  if (downloadedMedia.length > 0) {
-    const allExistingImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
-    for (const media of downloadedMedia) {
-      if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
-        const imageHash = await hashManager.generatePHash(media.buffer);
-        for (const existing of allExistingImageHashes) {
-          const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
-          if (similarity >= config.imageThreshold) return { duplicate: true, message: `图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
+  try {
+    const textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+    const imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+    const combinedText = finalElementsForDb.filter(el => el.type === 'text' && typeof el.content === 'string').map(el => el.content).join(' ');
+    if (combinedText) {
+      const newSimhash = hashManager.generateTextSimhash(combinedText);
+      if (newSimhash) {
+        const existingTextHashes = await ctx.database.get('cave_hash', { type: 'text' });
+        for (const existing of existingTextHashes) {
+          const similarity = hashManager.calculateSimilarity(newSimhash, existing.hash);
+          if (similarity >= config.textThreshold) return { duplicate: true, message: `文本与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
         }
-        imageHashesToStore.push({ hash: imageHash, type: 'image' });
-        allExistingImageHashes.push({ cave: 0, hash: imageHash, type: 'image' });
+        textHashesToStore.push({ hash: newSimhash, type: 'text' });
       }
     }
+    if (downloadedMedia.length > 0) {
+      const allExistingImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
+      for (const media of downloadedMedia) {
+        if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
+          const imageHash = await hashManager.generatePHash(media.buffer);
+          for (const existing of allExistingImageHashes) {
+            const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
+            if (similarity >= config.imageThreshold) return { duplicate: true, message: `图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
+          }
+          imageHashesToStore.push({ hash: imageHash, type: 'image' });
+          allExistingImageHashes.push({ cave: 0, hash: imageHash, type: 'image' });
+        }
+      }
+    }
+    return { duplicate: false, textHashesToStore, imageHashesToStore };
+  } catch (error) {
+    logger.warn('相似度比较失败:', error);
+    return { duplicate: false, textHashesToStore: [], imageHashesToStore: [] };
   }
-  return { duplicate: false, textHashesToStore, imageHashesToStore };
 }
 
 /**
@@ -338,11 +341,10 @@ export async function performSimilarityChecks(ctx: Context, config: Config, hash
  */
 export async function handleFileUploads(
   ctx: Context, config: Config, fileManager: FileManager, logger: Logger, cave: CaveObject,
-  downloadedMedia: { fileName: string, buffer: Buffer }[], reusableIds: Set<number>, session: Session
+  downloadedMedia: { fileName: string, buffer: Buffer }[], reusableIds: Set<number>, needsReview: boolean
 ): Promise<'pending' | 'active'> {
   try {
     await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
-    const needsReview = config.enablePend && session.channelId !== config.adminChannel?.split(':')[1];
     const finalStatus = needsReview ? 'pending' : 'active';
     await ctx.database.upsert('cave', [{ id: cave.id, status: finalStatus }]);
     return finalStatus;

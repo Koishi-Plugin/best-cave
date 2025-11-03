@@ -186,37 +186,12 @@ export class HashManager {
           if (!cavesToProcess.length) return '无可修复的回声洞';
           let fixedFiles = 0;
           let errorCount = 0;
-          const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
-          const JPEG_SIGNATURE = Buffer.from([0xFF, 0xD8]);
-          const GIF_SIGNATURE = Buffer.from('GIF');
           for (const cave of cavesToProcess) {
             const imageElements = cave.elements.filter(el => el.type === 'image' && el.file);
             for (const element of imageElements) {
               try {
                 const originalBuffer = await this.fileManager.readFile(element.file);
-                let sanitizedBuffer = originalBuffer;
-                if (originalBuffer.slice(0, 8).equals(PNG_SIGNATURE)) {
-                    const IEND_CHUNK = Buffer.from('IEND');
-                    const iendIndex = originalBuffer.lastIndexOf(IEND_CHUNK);
-                    if (iendIndex !== -1) {
-                        const endOfPngData = iendIndex + 8;
-                        if (originalBuffer.length > endOfPngData) sanitizedBuffer = originalBuffer.slice(0, endOfPngData);
-                    }
-                } else if (originalBuffer.slice(0, 2).equals(JPEG_SIGNATURE)) {
-                    const EOI_MARKER = Buffer.from([0xFF, 0xD9]);
-                    const eoiIndex = originalBuffer.lastIndexOf(EOI_MARKER);
-                    if (eoiIndex !== -1) {
-                        const endOfJpegData = eoiIndex + 2;
-                        if (originalBuffer.length > endOfJpegData) sanitizedBuffer = originalBuffer.slice(0, endOfJpegData);
-                    }
-                } else if (originalBuffer.slice(0, 3).equals(GIF_SIGNATURE)) {
-                    const GIF_TERMINATOR = Buffer.from([0x3B]);
-                    const terminatorIndex = originalBuffer.lastIndexOf(GIF_TERMINATOR);
-                    if (terminatorIndex !== -1) {
-                        const endOfGifData = terminatorIndex + 1;
-                        if (originalBuffer.length > endOfGifData) sanitizedBuffer = originalBuffer.slice(0, endOfGifData);
-                    }
-                }
+                const sanitizedBuffer = this.sanitizeImageBuffer(originalBuffer);
                 if (!originalBuffer.equals(sanitizedBuffer)) {
                   await this.fileManager.saveFile(element.file, sanitizedBuffer);
                   fixedFiles++;
@@ -235,6 +210,41 @@ export class HashManager {
           return `操作失败: ${error.message}`;
         }
       });
+  }
+
+  /**
+   * @description 扫描并修复单个图片 Buffer，移除文件结束符之后的多余数据。
+   * @param imageBuffer - 原始的图片 Buffer。
+   * @returns 修复后的图片 Buffer。如果无需修复，则返回原始 Buffer。
+   */
+  public sanitizeImageBuffer(imageBuffer: Buffer): Buffer {
+    const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    const JPEG_SIGNATURE = Buffer.from([0xFF, 0xD8]);
+    const GIF_SIGNATURE = Buffer.from('GIF');
+    let sanitizedBuffer = imageBuffer;
+    if (imageBuffer.slice(0, 8).equals(PNG_SIGNATURE)) {
+        const IEND_CHUNK = Buffer.from('IEND');
+        const iendIndex = imageBuffer.lastIndexOf(IEND_CHUNK);
+        if (iendIndex !== -1) {
+            const endOfPngData = iendIndex + 8;
+            if (imageBuffer.length > endOfPngData) sanitizedBuffer = imageBuffer.slice(0, endOfPngData);
+        }
+    } else if (imageBuffer.slice(0, 2).equals(JPEG_SIGNATURE)) {
+        const EOI_MARKER = Buffer.from([0xFF, 0xD9]);
+        const eoiIndex = imageBuffer.lastIndexOf(EOI_MARKER);
+        if (eoiIndex !== -1) {
+            const endOfJpegData = eoiIndex + 2;
+            if (imageBuffer.length > endOfJpegData) sanitizedBuffer = imageBuffer.slice(0, endOfJpegData);
+        }
+    } else if (imageBuffer.slice(0, 3).equals(GIF_SIGNATURE)) {
+        const GIF_TERMINATOR = Buffer.from([0x3B]);
+        const terminatorIndex = imageBuffer.lastIndexOf(GIF_TERMINATOR);
+        if (terminatorIndex !== -1) {
+            const endOfGifData = terminatorIndex + 1;
+            if (imageBuffer.length > endOfGifData) sanitizedBuffer = imageBuffer.slice(0, endOfGifData);
+        }
+    }
+    return sanitizedBuffer;
   }
 
   /**

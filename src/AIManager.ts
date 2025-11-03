@@ -128,15 +128,19 @@ export class AIManager {
    * @returns {Promise<void>} 分析和存储操作完成后解析的 Promise。
    */
   public async analyzeAndStore(cave: CaveObject, mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<void> {
-    const mediaMap = mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined;
-    const [result] = await this.getAnalyses([cave], mediaMap);
-    if (result) {
-      await this.ctx.database.upsert('cave_meta', [{
-        cave: cave.id,
-        keywords: result.keywords || [],
-        description: result.description || '',
-        rating: Math.max(0, Math.min(100, result.rating || 0)),
-      }]);
+    try {
+      const mediaMap = mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined;
+      const [result] = await this.getAnalyses([cave], mediaMap);
+      if (result) {
+        await this.ctx.database.upsert('cave_meta', [{
+          cave: cave.id,
+          keywords: result.keywords || [],
+          description: result.description || '',
+          rating: Math.max(0, Math.min(100, result.rating || 0)),
+        }]);
+      }
+    } catch (error) {
+      this.logger.error(`分析回声洞（${cave.id}）出错:`, error);
     }
   }
 
