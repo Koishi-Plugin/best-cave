@@ -85,7 +85,6 @@ export interface Config {
   aiEndpoint?: string;
   aiApiKey?: string;
   aiModel?: string;
-  aiRPM?: number;
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -104,10 +103,9 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description('复核配置'),
   Schema.object({
     enableAI: Schema.boolean().default(false).description("启用 AI"),
-    aiEndpoint: Schema.string().description('端点 (Endpoint)').role('link').default('https://generativelanguage.googleapis.com/v1beta/openai'),
+    aiEndpoint: Schema.string().description('端点 (Endpoint)').role('link').default('https://api.siliconflow.cn/v1'),
     aiApiKey: Schema.string().description('密钥 (Key)').role('secret'),
-    aiModel: Schema.string().description('模型 (Model)').default('gemini-2.5-flash'),
-    aiRPM: Schema.number().description('每分钟请求数 (RPM)').default(60),
+    aiModel: Schema.string().description('模型 (Model)').default('THUDM/GLM-4.1V-9B-Thinking'),
   }).description('模型配置'),
   Schema.object({
     localPath: Schema.string().description('文件映射路径'),
@@ -239,7 +237,10 @@ export function apply(ctx: Context, config: Config) {
         if (hasMedia) finalStatus = await utils.handleFileUploads(ctx, config, fileManager, logger, newCave, downloadedMedia, reusableIds, needsReview);
         if (finalStatus !== 'preload') {
           newCave.status = finalStatus;
-          if (aiManager) await aiManager.analyzeAndStore([newCave], downloadedMedia);
+          if (aiManager) {
+            const analyses = await aiManager.analyze([newCave], downloadedMedia);
+            if (analyses.length > 0) await ctx.database.upsert('cave_meta', analyses);
+          }
           if (hashManager) {
             const allHashesToInsert = [...textHashesToStore, ...imageHashesToStore].map(h => ({ ...h, cave: newCave.id }));
             if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);
