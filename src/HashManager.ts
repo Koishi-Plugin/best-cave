@@ -60,22 +60,33 @@ export class HashManager {
           const cavesToProcess = allCaves.filter(cave => !hashedCaveIds.has(cave.id));
           if (cavesToProcess.length === 0) return '无需补全回声洞哈希';
           await session.send(`开始补全 ${cavesToProcess.length} 个回声洞的哈希...`);
-          const hashesToInsert: CaveHashObject[] = [];
+          let hashesToInsert: CaveHashObject[] = [];
           let processedCaveCount = 0;
+          let totalHashesGenerated = 0;
           let errorCount = 0;
+          const flushBatch = async () => {
+            if (hashesToInsert.length === 0) return;
+            await this.ctx.database.upsert('cave_hash', hashesToInsert);
+            totalHashesGenerated += hashesToInsert.length;
+            this.logger.info(`[${processedCaveCount}/${cavesToProcess.length}] 正在导入 ${hashesToInsert.length} 条回声洞哈希...`);
+            hashesToInsert = [];
+          };
           for (const cave of cavesToProcess) {
             processedCaveCount++;
             try {
               const newHashesForCave = await this.generateAllHashesForCave(cave);
-              if (newHashesForCave.length > 0) hashesToInsert.push(...newHashesForCave);
+              if (newHashesForCave.length > 0) {
+                hashesToInsert.push(...newHashesForCave);
+              }
+              if (hashesToInsert.length >= 100) await flushBatch();
             } catch (error) {
               errorCount++;
               this.logger.warn(`补全回声洞（${cave.id}）哈希时出错: ${error.message}`);
             }
           }
-          if (hashesToInsert.length > 0) await this.ctx.database.upsert('cave_hash', hashesToInsert);
+          await flushBatch();
           const successCount = processedCaveCount - errorCount;
-          return `已补全 ${successCount} 个回声洞的 ${hashesToInsert.length} 条哈希（失败 ${errorCount} 条）`;
+          return `已补全 ${successCount} 个回声洞的 ${totalHashesGenerated} 条哈希（失败 ${errorCount} 条）`;
         } catch (error) {
           this.logger.error('补全哈希失败:', error);
           return `操作失败: ${error.message}`;

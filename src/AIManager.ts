@@ -118,10 +118,13 @@ export class AIManager {
       const formatContent = (elements: StoredElement[]) => elements.filter(el => el.type === 'text').map(el => el.content as string).join(' ');
       const userMessage = {
         role: 'user',
-        content: JSON.stringify({
-          new_content: { text: formatContent(newElements) },
-          existing_contents: potentialDuplicates.map(cave => ({ id: cave.id, text: formatContent(cave.elements) })),
-        })
+        content: [{
+          type: 'input_text',
+          text: JSON.stringify({
+            new_content: { text: formatContent(newElements) },
+            existing_contents: potentialDuplicates.map(cave => ({ id: cave.id, text: formatContent(cave.elements) })),
+          })
+        }]
       };
       const response = await this.requestAI([userMessage], this.config.aiCheckPrompt, this.config.aiCheckSchema);
       return {
@@ -167,7 +170,7 @@ export class AIManager {
   private async getAnalysis(elements: StoredElement[], mediaToSave?: { sourceUrl: string, fileName: string }[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<Omit<CaveMetaObject, 'cave'>> {
     const userContent: any[] = [];
     const combinedText = elements.filter(el => el.type === 'text' && el.content).map(el => el.content as string).join('\n');
-    if (combinedText.trim()) userContent.push({ type: 'text', text: combinedText });
+    if (combinedText.trim()) userContent.push({ type: 'input_text', text: combinedText });
     const mediaMap = new Map(mediaBuffers?.map(m => [m.fileName, m.buffer]));
     const imageElements = elements.filter(el => el.type === 'image' && el.file);
     for (const el of imageElements) {
@@ -184,8 +187,8 @@ export class AIManager {
         if (buffer) {
           const mimeType = path.extname(el.file).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
           userContent.push({
-            type: 'image_url',
-            image_url: { url: `data:${mimeType};base64,${buffer.toString('base64')}` }
+            type: 'input_image',
+            image_url: `data:${mimeType};base64,${buffer.toString('base64')}`
           });
         }
       } catch (error) {
@@ -217,22 +220,28 @@ export class AIManager {
       this.rateLimitResetTime = Date.now() + 60000;
       this.requestCount = 0;
     }
-    let schema = JSON.parse(schemaString);
-    const toolName = 'extract_data';
+    let schema: object;
+    try {
+        schema = JSON.parse(schemaString);
+    } catch (error) {
+        this.logger.error('解析 JSON Schema 失败:', error);
+        throw new Error('无效的 JSON Schema 配置');
+    }
     const payload = {
       model: this.config.aiModel,
-      messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      tools: [{
-        type: 'function',
-        function: {
-          name: toolName,
-          description: '根据提供的内容提取或分析信息。',
-          parameters: schema,
-        },
-      }],
-      tool_choice: { type: 'function', function: { name: toolName } },
+      input: [
+        { role: 'system', content: systemPrompt },
+        ...messages
+      ],
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'extracted_data',
+          schema: schema,
+        }
+      }
     };
-    const fullUrl = `${this.config.aiEndpoint.replace(/\/$/, '')}/chat/completions`;
+    const fullUrl = `${this.config.aiEndpoint.replace(/\/$/, '')}/responses`;
     const headers = {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${this.config.aiApiKey}`
@@ -240,9 +249,9 @@ export class AIManager {
     try {
       this.requestCount++;
       const response = await this.http.post(fullUrl, payload, { headers, timeout: 90000 });
-      const toolCall = response.choices?.[0]?.message?.tool_calls?.[0];
-      if (toolCall?.function?.arguments) {
-        return JSON.parse(toolCall.function.arguments);
+      const responseText = response.output?.[0]?.content?.[0]?.text;
+      if (responseText) {
+        return JSON.parse(responseText);
       } else {
         this.logger.error('AI 响应格式不正确:', JSON.stringify(response));
         throw new Error('AI 响应格式不正确');
