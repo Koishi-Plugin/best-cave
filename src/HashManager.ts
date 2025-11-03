@@ -74,10 +74,27 @@ export class HashManager {
           for (const cave of cavesToProcess) {
             processedCaveCount++;
             try {
-              const newHashesForCave = await this.generateAllHashesForCave(cave);
-              if (newHashesForCave.length > 0) {
-                hashesToInsert.push(...newHashesForCave);
+              const tempHashes: CaveHashObject[] = [];
+              const uniqueHashTracker = new Set<string>();
+              const addUniqueHash = (hashObj: CaveHashObject) => {
+                  const key = `${hashObj.hash}-${hashObj.type}`;
+                  if (!uniqueHashTracker.has(key)) {
+                      tempHashes.push(hashObj);
+                      uniqueHashTracker.add(key);
+                  }
               }
+              const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content).join(' ');
+              if (combinedText) {
+                const textHash = this.generateTextSimhash(combinedText);
+                if (textHash) addUniqueHash({ cave: cave.id, hash: textHash, type: 'text' });
+              }
+              for (const el of cave.elements.filter(el => el.type === 'image' && el.file)) {
+                const imageBuffer = await this.fileManager.readFile(el.file);
+                const imageHash = await this.generatePHash(imageBuffer);
+                addUniqueHash({ cave: cave.id, hash: imageHash, type: 'image' });
+              }
+              const newHashesForCave = tempHashes;
+              if (newHashesForCave.length > 0) hashesToInsert.push(...newHashesForCave);
               if (hashesToInsert.length >= 100) await flushBatch();
             } catch (error) {
               errorCount++;
@@ -218,39 +235,6 @@ export class HashManager {
           return `操作失败: ${error.message}`;
         }
       });
-  }
-
-  /**
-   * @description 为单个回声洞对象生成所有类型的哈希（文本+图片）。
-   * @param cave - 回声洞对象。
-   * @returns 生成的哈希对象数组。
-   */
-  public async generateAllHashesForCave(cave: Pick<CaveObject, 'id' | 'elements'>): Promise<CaveHashObject[]> {
-    const tempHashes: CaveHashObject[] = [];
-    const uniqueHashTracker = new Set<string>();
-    const addUniqueHash = (hashObj: CaveHashObject) => {
-        const key = `${hashObj.hash}-${hashObj.type}`;
-        if (!uniqueHashTracker.has(key)) {
-            tempHashes.push(hashObj);
-            uniqueHashTracker.add(key);
-        }
-    }
-    const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content).join(' ');
-    if (combinedText) {
-      const textHash = this.generateTextSimhash(combinedText);
-      if (textHash) addUniqueHash({ cave: cave.id, hash: textHash, type: 'text' });
-    }
-    for (const el of cave.elements.filter(el => el.type === 'image' && el.file)) {
-      try {
-        const imageBuffer = await this.fileManager.readFile(el.file);
-        const imageHash = await this.generatePHash(imageBuffer);
-        addUniqueHash({ cave: cave.id, hash: imageHash, type: 'image' });
-      } catch (error) {
-        this.logger.warn(`无法为回声洞（${cave.id}）的图片（${el.file}）生成哈希:`, error);
-        throw error;
-      }
-    }
-    return tempHashes;
   }
 
   /**
