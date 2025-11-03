@@ -182,7 +182,7 @@ export class AIManager {
     } catch (error) {
       const caveIds = caves.map(c => c.id).join(', ');
       this.logger.error(`分析回声洞 (${caveIds}) 出错:`, error);
-      return 0;
+      throw error;
     }
   }
 
@@ -278,11 +278,14 @@ export class AIManager {
     };
     this.requestCount++;
     const response = await this.http.post(fullUrl, payload, { headers, timeout: 90000 });
-    const content = response.choices?.[0]?.message?.content;
-    this.logger.info('原始响应:', content);
+    const content = response?.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || !content.trim()) {
+      this.logger.error('原始响应:', JSON.stringify(response, null, 2));
+      throw new Error('响应无效');
+    }
     try {
       const jsonRegex = /```json\s*([\s\S]*?)\s*```/;
-      const match = content?.match(jsonRegex);
+      const match = content.match(jsonRegex);
       let jsonString = '';
       if (match && match[1]) {
         jsonString = match[1];
@@ -292,7 +295,6 @@ export class AIManager {
       return JSON.parse(jsonString);
     } catch (error) {
       this.logger.error('解析 JSON 失败:', error);
-      this.logger.error('原始响应:', content);
       throw new Error('解析失败');
     }
   }
