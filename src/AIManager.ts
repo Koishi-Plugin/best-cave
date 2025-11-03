@@ -167,23 +167,17 @@ export class AIManager {
    * @returns {Promise<number>} 一个 Promise，解析为成功分析和存储的条目数。
    */
   public async analyzeAndStore(caves: CaveObject[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<number> {
-    try {
-      const mediaMap = mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined;
-      const results = await this.getAnalyses(caves, mediaMap);
-      if (!results?.length) return 0;
-      const caveMetaObjects = results.map(res => ({
-        cave: res.cave,
-        keywords: res.keywords || [],
-        description: res.description || '',
-        rating: Math.max(0, Math.min(100, res.rating || 0)),
-      }));
-      await this.ctx.database.upsert('cave_meta', caveMetaObjects);
-      return caveMetaObjects.length;
-    } catch (error) {
-      const caveIds = caves.map(c => c.id).join(', ');
-      this.logger.error(`分析回声洞 (${caveIds}) 出错:`, error);
-      throw error;
-    }
+    const mediaMap = mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined;
+    const results = await this.getAnalyses(caves, mediaMap);
+    if (!results?.length) return 0;
+    const caveMetaObjects = results.map(res => ({
+      cave: res.cave,
+      keywords: res.keywords || [],
+      description: res.description || '',
+      rating: Math.max(0, Math.min(100, res.rating || 0)),
+    }));
+    await this.ctx.database.upsert('cave_meta', caveMetaObjects);
+    return caveMetaObjects.length;
   }
 
   /**
@@ -235,10 +229,14 @@ export class AIManager {
       )).filter(Boolean);
       return { id: cave.id, text: combinedText, images: imagesBase64 };
     }));
-    const nonEmptyPayload = batchPayload.filter(p => p.text.trim() || p.images.length > 0);
-    if (nonEmptyPayload.length === 0) return [];
-    const userMessage = { role: 'user', content: JSON.stringify(nonEmptyPayload) };
-    const analysePrompt = `你是一位内容分析专家。请使用中文，分析我以JSON格式提供的一组内容，为每一项内容总结关键词、概括内容并评分。你的回复必须且只能是一个包裹在 \`\`\`json ... \`\`\` 代码块中的有效 JSON 对象。该JSON对象应有一个 "analyses" 键，其值为一个数组。数组中的每个对象都必须包含 "id" (整数), "keywords" (字符串数组), "description" (字符串), 和 "rating" (0-100的整数)。`;
+    const nonEmptyPayloads = batchPayload.filter(p => p.text.trim() || p.images.length > 0);
+    if (nonEmptyPayloads.length === 0) return [];
+    const contentForAI = [];
+    const textData = nonEmptyPayloads.map(({ id, text }) => ({ id, text }));
+    contentForAI.push({ type: 'text', text: JSON.stringify(textData) });
+    nonEmptyPayloads.forEach(payload => { payload.images.forEach(imageBase64Url => { contentForAI.push({ type: 'image_url', image_url: { url: imageBase64Url } }) }) });
+    const userMessage = { role: 'user', content: contentForAI };
+    const analysePrompt = `你是一位内容分析专家。请使用中文，分析我以JSON格式提供的一组内容（位于消息的第一个 text 部分），并结合可能附带的图片，为每一项内容总结关键词、概括内容并评分。你的回复必须且只能是一个包裹在 \`\`\`json ... \`\`\` 代码块中的有效 JSON 对象。该JSON对象应有一个 "analyses" 键，其值为一个数组。数组中的每个对象都必须包含 "id" (整数), "keywords" (字符串数组), "description" (字符串), 和 "rating" (0-100的整数)。`;
     const response = await this.requestAI<{ analyses?: { id: number; keywords: string[]; description: string; rating: number; }[] }>([userMessage], analysePrompt);
     return (response.analyses || []).map(res => ({
       cave: res.id,
