@@ -299,25 +299,25 @@ export async function performSimilarityChecks(ctx: Context, config: Config, hash
   if (combinedText) {
     const newSimhash = hashManager.generateTextSimhash(combinedText);
     if (newSimhash) {
-      const existingTextHashes = await ctx.database.get('cave_hash', { type: 'simhash' });
+      const existingTextHashes = await ctx.database.get('cave_hash', { type: 'text' });
       for (const existing of existingTextHashes) {
         const similarity = hashManager.calculateSimilarity(newSimhash, existing.hash);
         if (similarity >= config.textThreshold) return { duplicate: true, message: `文本与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
       }
-      textHashesToStore.push({ hash: newSimhash, type: 'simhash' });
+      textHashesToStore.push({ hash: newSimhash, type: 'text' });
     }
   }
   if (downloadedMedia.length > 0) {
-    const allExistingImageHashes = await ctx.database.get('cave_hash', { type: 'phash' });
+    const allExistingImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
     for (const media of downloadedMedia) {
       if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
-        const imageHash = await hashManager.generatePHash(media.buffer, 256);
+        const imageHash = await hashManager.generatePHash(media.buffer);
         for (const existing of allExistingImageHashes) {
           const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
           if (similarity >= config.imageThreshold) return { duplicate: true, message: `图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
         }
-        imageHashesToStore.push({ hash: imageHash, type: 'phash' });
-        allExistingImageHashes.push({ cave: 0, hash: imageHash, type: 'phash' });
+        imageHashesToStore.push({ hash: imageHash, type: 'image' });
+        allExistingImageHashes.push({ cave: 0, hash: imageHash, type: 'image' });
       }
     }
   }

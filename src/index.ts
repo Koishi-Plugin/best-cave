@@ -85,7 +85,7 @@ export interface Config {
   aiEndpoint?: string;
   aiApiKey?: string;
   aiModel?: string;
-  aiTPM?: number;
+  aiRPM?: number;
   AnalysePrompt?: string;
   aiCheckPrompt?: string;
   aiAnalyseSchema?: string;
@@ -111,7 +111,7 @@ export const Config: Schema<Config> = Schema.intersect([
     aiEndpoint: Schema.string().description('端点 (Endpoint)').role('link').default('https://generativelanguage.googleapis.com/v1beta/openai'),
     aiApiKey: Schema.string().description('密钥 (Key)').role('secret'),
     aiModel: Schema.string().description('模型 (Model)').default('gemini-2.5-flash'),
-    aiTPM: Schema.number().description('每分钟请求数 (TPM)').default(60),
+    aiRPM: Schema.number().description('每分钟请求数 (RPM)').default(60),
     AnalysePrompt: Schema.string().role('textarea').default(`你是一位内容分析专家。请分析我提供的内容，总结关键词，概括内容并进行评分。`).description('分析 Prompt'),
     aiAnalyseSchema: Schema.string().role('textarea').default(
       `{

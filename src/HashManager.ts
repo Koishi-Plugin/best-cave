@@ -1,8 +1,9 @@
 import { Context, Logger } from 'koishi';
 import { Config, CaveObject } from './index';
-import sharp from 'sharp';
+import Jimp from 'jimp';
 import { FileManager } from './FileManager';
 import * as crypto from 'crypto';
+import { requireAdmin } from './Utils';
 
 /**
  * @description 数据库 `cave_hash` 表的完整对象模型。
@@ -10,7 +11,7 @@ import * as crypto from 'crypto';
 export interface CaveHashObject {
   cave: number;
   hash: string;
-  type: 'simhash' | 'phash';
+  type: 'text' | 'image';
 }
 
 /**
@@ -48,21 +49,48 @@ export class HashManager {
    * @param cave - 主 `cave` 命令实例。
    */
   public registerCommands(cave) {
-    const adminCheck = ({ session }) => {
-      const adminChannelId = this.config.adminChannel?.split(':')[1];
-      if (session.channelId !== adminChannelId) return '此指令仅限在管理群组中使用';
-    };
-
     cave.subcommand('.hash', '校验回声洞', { hidden: true , authority: 3 })
       .usage('校验缺失哈希的回声洞，补全哈希记录。')
-      .action(async (argv) => {
-        const checkResult = adminCheck(argv);
-        if (checkResult) return checkResult;
-        await argv.session.send('正在处理，请稍候...');
+      .action(async ({ session }) => {
+        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
         try {
-          return await this.generateHashesForHistoricalCaves();
+          const allCaves = await this.ctx.database.get('cave', { status: 'active' });
+          if (allCaves.length === 0) return '无需补全回声洞哈希';
+          await session.send(`开始补全 ${allCaves.length} 个回声洞的哈希...`);
+          const existingHashes = await this.ctx.database.get('cave_hash', {});
+          const existingHashSet = new Set(existingHashes.map(h => `${h.cave}-${h.hash}-${h.type}`));
+          let hashesToInsert: CaveHashObject[] = [];
+          let processedCaveCount = 0;
+          let totalHashesGenerated = 0;
+          let errorCount = 0;
+          const flushBatch = async () => {
+            if (hashesToInsert.length === 0) return;
+            await this.ctx.database.upsert('cave_hash', hashesToInsert);
+            totalHashesGenerated += hashesToInsert.length;
+            this.logger.info(`[${processedCaveCount}/${allCaves.length}] 正在导入 ${hashesToInsert.length} 条回声洞哈希...`);
+            hashesToInsert = [];
+          };
+          for (const cave of allCaves) {
+            processedCaveCount++;
+            try {
+              const newHashesForCave = await this.generateAllHashesForCave(cave);
+              for (const hashObj of newHashesForCave) {
+                const uniqueKey = `${hashObj.cave}-${hashObj.hash}-${hashObj.type}`;
+                if (!existingHashSet.has(uniqueKey)) {
+                  hashesToInsert.push(hashObj);
+                  existingHashSet.add(uniqueKey);
+                }
+              }
+              if (hashesToInsert.length >= 100) await flushBatch();
+            } catch (error) {
+              errorCount++;
+              this.logger.warn(`补全回声洞（${cave.id}）哈希时出错: ${error.message}`);
+            }
+          }
+          await flushBatch();
+          return `已补全 ${allCaves.length} 个回声洞的 ${totalHashesGenerated} 条哈希（失败 ${errorCount} 条）`;
         } catch (error) {
-          this.logger.error('生成历史哈希失败:', error);
+          this.logger.error('生成哈希失败:', error);
           return `操作失败: ${error.message}`;
         }
       });
@@ -71,59 +99,54 @@ export class HashManager {
       .usage('检查所有回声洞，找出相似度过高的内容。')
       .option('textThreshold', '-t <threshold:number> 文本相似度阈值 (%)')
       .option('imageThreshold', '-i <threshold:number> 图片相似度阈值 (%)')
-      .action(async (argv) => {
-        const checkResult = adminCheck(argv);
-        if (checkResult) return checkResult;
-        await argv.session.send('正在检查，请稍候...');
+      .action(async ({ session, options }) => {
+        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        await session.send('正在检查，请稍候...');
         try {
-          return await this.checkForSimilarCaves(argv.options);
+          const textThreshold = options.textThreshold ?? this.config.textThreshold;
+          const imageThreshold = options.imageThreshold ?? this.config.imageThreshold;
+          const allHashes = await this.ctx.database.get('cave_hash', {});
+          const allCaveIds = [...new Set(allHashes.map(h => h.cave))];
+          const textHashes = new Map<number, string>();
+          const imageHashes = new Map<number, string>();
+          for (const hash of allHashes) {
+            if (hash.type === 'text') {
+              textHashes.set(hash.cave, hash.hash);
+            } else if (hash.type === 'image') {
+              imageHashes.set(hash.cave, hash.hash);
+            }
+          }
+          const similarPairs = { text: new Set<string>(), image: new Set<string>() };
+          for (let i = 0; i < allCaveIds.length; i++) {
+            for (let j = i + 1; j < allCaveIds.length; j++) {
+              const id1 = allCaveIds[i];
+              const id2 = allCaveIds[j];
+              const pair = [id1, id2].sort((a, b) => a - b).join(' & ');
+              const text1 = textHashes.get(id1);
+              const text2 = textHashes.get(id2);
+              if (text1 && text2) {
+                const similarity = this.calculateSimilarity(text1, text2);
+                if (similarity >= textThreshold) similarPairs.text.add(`${pair} = ${similarity.toFixed(2)}%`);
+              }
+              const image1 = imageHashes.get(id1);
+              const image2 = imageHashes.get(id2);
+              if (image1 && image2) {
+                const similarity = this.calculateSimilarity(image1, image2);
+                if (similarity >= imageThreshold) similarPairs.image.add(`${pair} = ${similarity.toFixed(2)}%`);
+              }
+            }
+          }
+          const totalFindings = similarPairs.text.size + similarPairs.image.size;
+          if (totalFindings === 0) return '未发现高相似度的内容';
+          let report = `已发现 ${totalFindings} 组高相似度的内容:`;
+          if (similarPairs.text.size > 0) report += '\n文本内容相似:\n' + [...similarPairs.text].join('\n');
+          if (similarPairs.image.size > 0) report += '\n图片内容相似:\n' + [...similarPairs.image].join('\n');
+          return report.trim();
         } catch (error) {
           this.logger.error('检查相似度失败:', error);
           return `检查失败: ${error.message}`;
         }
       });
-  }
-
-  /**
-   * @description 检查数据库中所有回声洞，为没有哈希记录的历史数据生成哈希。
-   * @returns 一个包含操作结果的报告字符串。
-   */
-  public async generateHashesForHistoricalCaves(): Promise<string> {
-    const allCaves = await this.ctx.database.get('cave', { status: 'active' });
-    const existingHashes = await this.ctx.database.get('cave_hash', {});
-    const existingHashSet = new Set(existingHashes.map(h => `${h.cave}-${h.hash}-${h.type}`));
-    if (allCaves.length === 0) return '无需补全回声洞哈希';
-    this.logger.info(`开始补全 ${allCaves.length} 个回声洞的哈希...`);
-    let hashesToInsert: CaveHashObject[] = [];
-    let processedCaveCount = 0;
-    let totalHashesGenerated = 0;
-    let errorCount = 0;
-    const flushBatch = async () => {
-      if (hashesToInsert.length === 0) return;
-      await this.ctx.database.upsert('cave_hash', hashesToInsert);
-      totalHashesGenerated += hashesToInsert.length;
-      this.logger.info(`[${processedCaveCount}/${allCaves.length}] 正在导入 ${hashesToInsert.length} 条回声洞哈希...`);
-      hashesToInsert = [];
-    };
-    for (const cave of allCaves) {
-      processedCaveCount++;
-      try {
-        const newHashesForCave = await this.generateAllHashesForCave(cave);
-        for (const hashObj of newHashesForCave) {
-          const uniqueKey = `${hashObj.cave}-${hashObj.hash}-${hashObj.type}`;
-          if (!existingHashSet.has(uniqueKey)) {
-            hashesToInsert.push(hashObj);
-            existingHashSet.add(uniqueKey);
-          }
-        }
-        if (hashesToInsert.length >= 100) await flushBatch();
-      } catch (error) {
-        errorCount++;
-        this.logger.warn(`补全回声洞（${cave.id}）哈希时发生错误: ${error.message}`);
-      }
-    }
-    await flushBatch();
-    return `已补全 ${allCaves.length} 个回声洞的 ${totalHashesGenerated} 条哈希（失败 ${errorCount} 条）`;
   }
 
   /**
@@ -144,13 +167,13 @@ export class HashManager {
     const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content).join(' ');
     if (combinedText) {
       const textHash = this.generateTextSimhash(combinedText);
-      if (textHash) addUniqueHash({ cave: cave.id, hash: textHash, type: 'simhash' });
+      if (textHash) addUniqueHash({ cave: cave.id, hash: textHash, type: 'text' });
     }
     for (const el of cave.elements.filter(el => el.type === 'image' && el.file)) {
       try {
         const imageBuffer = await this.fileManager.readFile(el.file);
-        const imageHash = await this.generatePHash(imageBuffer, 256);
-        addUniqueHash({ cave: cave.id, hash: imageHash, type: 'phash' });
+        const imageHash = await this.generatePHash(imageBuffer);
+        addUniqueHash({ cave: cave.id, hash: imageHash, type: 'image' });
       } catch (e) {
         this.logger.warn(`无法为回声洞（${cave.id}）的图片（${el.file}）生成哈希:`, e);
       }
@@ -159,104 +182,57 @@ export class HashManager {
   }
 
   /**
-   * @description 对数据库中所有哈希进行两两比较，找出相似度过高的内容。
-   * @param options 包含临时阈值的可选对象。
-   * @returns 一个包含检查结果的报告字符串。
+   * @description 执行一维离散余弦变换 (DCT-II) 的方法。
+   * @param input - 输入的数字数组。
+   * @returns DCT 变换后的数组。
    */
-  public async checkForSimilarCaves(options: { textThreshold?: number; imageThreshold?: number } = {}): Promise<string> {
-    const textThreshold = options.textThreshold ?? this.config.textThreshold;
-    const imageThreshold = options.imageThreshold ?? this.config.imageThreshold;
-    const allHashes = await this.ctx.database.get('cave_hash', {});
-    const allCaveIds = [...new Set(allHashes.map(h => h.cave))];
-    const textHashes = new Map<number, string>();
-    const imageHashes = new Map<number, string>();
-    for (const hash of allHashes) {
-      if (hash.type === 'simhash') {
-        textHashes.set(hash.cave, hash.hash);
-      } else if (hash.type === 'phash') {
-        imageHashes.set(hash.cave, hash.hash);
-      }
+  private dct1D(input: number[]): number[] {
+    const N = input.length;
+    const output = new Array(N).fill(0);
+    const c0 = 1 / Math.sqrt(2);
+    for (let k = 0; k < N; k++) {
+      let sum = 0;
+      for (let n = 0; n < N; n++) sum += input[n] * Math.cos((Math.PI * (2 * n + 1) * k) / (2 * N));
+      const ck = (k === 0) ? c0 : 1;
+      output[k] = Math.sqrt(2 / N) * ck * sum;
     }
-    const similarPairs = {
-      text: new Set<string>(),
-      image: new Set<string>(),
-    };
-    for (let i = 0; i < allCaveIds.length; i++) {
-      for (let j = i + 1; j < allCaveIds.length; j++) {
-        const id1 = allCaveIds[i];
-        const id2 = allCaveIds[j];
-        const pair = [id1, id2].sort((a, b) => a - b).join(' & ');
-        // 比较文本哈希 (Simhash)
-        const text1 = textHashes.get(id1);
-        const text2 = textHashes.get(id2);
-        if (text1 && text2) {
-          const similarity = this.calculateSimilarity(text1, text2);
-          if (similarity >= textThreshold) similarPairs.text.add(`${pair} = ${similarity.toFixed(2)}%`);
-        }
-        // 比较图片哈希 (pHash)
-        const image1 = imageHashes.get(id1);
-        const image2 = imageHashes.get(id2);
-        if (image1 && image2) {
-          const similarity = this.calculateSimilarity(image1, image2);
-          if (similarity >= imageThreshold) similarPairs.image.add(`${pair} = ${similarity.toFixed(2)}%`);
-        }
-      }
-    }
-    const totalFindings = similarPairs.text.size + similarPairs.image.size;
-    if (totalFindings === 0) return '未发现高相似度的内容';
-    let report = `已发现 ${totalFindings} 组高相似度的内容:`;
-    if (similarPairs.text.size > 0) report += '\n文本内容相似:\n' + [...similarPairs.text].join('\n');
-    if (similarPairs.image.size > 0) report += '\n图片内容相似:\n' + [...similarPairs.image].join('\n');
-    return report.trim();
+    return output;
   }
 
   /**
-   * @description 执行二维离散余弦变换 (DCT-II)。
+   * @description 执行二维离散余弦变换 (DCT-II) 的方法。
+   * 通过对行和列分别应用一维 DCT 来实现。
    * @param matrix - 输入的 N x N 像素亮度矩阵。
-   * @returns DCT变换后的 N x N 系数矩阵。
+   * @returns DCT 变换后的 N x N 系数矩阵。
    */
-  private _dct2D(matrix: number[][]): number[][] {
+  private dct2D(matrix: number[][]): number[][] {
     const N = matrix.length;
     if (N === 0) return [];
-    const cosines = Array.from({ length: N }, (_, i) =>
-      Array.from({ length: N }, (_, j) => Math.cos((Math.PI * (2 * i + 1) * j) / (2 * N)))
-    );
-    const applyDct1D = (input: number[]): number[] => {
-      const output = new Array(N).fill(0);
-      const scale = Math.sqrt(2 / N);
-      for (let k = 0; k < N; k++) {
-        let sum = 0;
-        for (let n = 0; n < N; n++) sum += input[n] * cosines[n][k];
-        output[k] = scale * sum;
-      }
-      output[0] /= Math.sqrt(2);
-      return output;
-    };
-    const tempMatrix = matrix.map(row => applyDct1D(row));
-    const transposed = tempMatrix[0].map((_, col) => tempMatrix.map(row => row[col]));
-    const dctResult = transposed.map(row => applyDct1D(row));
-    return dctResult[0].map((_, col) => dctResult.map(row => row[col]));
+    const tempMatrix = matrix.map(row => this.dct1D(row));
+    const transposed = tempMatrix.map((_, colIndex) => tempMatrix.map(row => row[colIndex]));
+    const dctResultTransposed = transposed.map(row => this.dct1D(row));
+    const dctResult = dctResultTransposed.map((_, colIndex) => dctResultTransposed.map(row => row[colIndex]));
+    return dctResult;
   }
 
   /**
-   * @description pHash 算法核心实现。
-   * @param imageBuffer - 图片的Buffer。
-   * @param size - 期望的哈希位数 (必须是完全平方数, 如 64 或 256)。
-   * @returns 十六进制pHash字符串。
+   * @description pHash 算法核心实现，使用 Jimp 和自定义 DCT。
+   * @param imageBuffer - 图片的 Buffer。
+   * @returns 64位十六进制 pHash 字符串。
    */
-  public async generatePHash(imageBuffer: Buffer, size: number): Promise<string> {
-    const dctSize = 32;
-    const hashGridSize = Math.sqrt(size);
-    if (!Number.isInteger(hashGridSize)) throw new Error('哈希位数必须是完全平方数');
-    const pixels = await sharp(imageBuffer).grayscale().resize(dctSize, dctSize, { fit: 'fill' }).raw().toBuffer();
-    const matrix: number[][] = [];
-    for (let y = 0; y < dctSize; y++) matrix.push(Array.from(pixels.slice(y * dctSize, (y + 1) * dctSize)));
-    const dctMatrix = this._dct2D(matrix);
+  public async generatePHash(imageBuffer: Buffer): Promise<string> {
+    const image = await Jimp.read(imageBuffer);
+    image.resize(32, 32, Jimp.RESIZE_BILINEAR).greyscale();
+    const matrix: number[][] = Array.from({ length: 32 }, () => new Array(32).fill(0));
+    image.scan(0, 0, 32, 32, (x, y, idx) => { matrix[y][x] = image.bitmap.data[idx] });
+    const dctMatrix = this.dct2D(matrix);
     const coefficients: number[] = [];
-    for (let y = 0; y < hashGridSize; y++) for (let x = 0; x < hashGridSize; x++) coefficients.push(dctMatrix[y][x]);
-    const median = [...coefficients.slice(1)].sort((a, b) => a - b)[Math.floor((coefficients.length -1) / 2)];
-    const binaryHash = coefficients.map(val => val > median ? '1' : '0').join('');
-    return BigInt('0b' + binaryHash).toString(16).padStart(size / 4, '0');
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) coefficients.push(dctMatrix[y][x]);
+    const acCoefficients = coefficients.slice(1);
+    const average = acCoefficients.reduce((sum, val) => sum + val, 0) / acCoefficients.length;
+    let binaryHash = '';
+    for (const val of coefficients) binaryHash += (val > average) ? '1' : '0';
+    return BigInt('0b' + binaryHash).toString(16).padStart(16, '0');
   }
 
   /**
@@ -267,8 +243,10 @@ export class HashManager {
    */
   public calculateHammingDistance(hex1: string, hex2: string): number {
     let distance = 0;
-    const bin1 = hexToBinary(hex1);
-    const bin2 = hexToBinary(hex2);
+    let bin1 = '';
+    for (const char of hex1) bin1 += parseInt(char, 16).toString(2).padStart(4, '0');
+    let bin2 = '';
+    for (const char of hex2) bin2 += parseInt(char, 16).toString(2).padStart(4, '0');
     const len = Math.min(bin1.length, bin2.length);
     for (let i = 0; i < len; i++) if (bin1[i] !== bin2[i]) distance++;
     return distance;
@@ -294,14 +272,8 @@ export class HashManager {
   public generateTextSimhash(text: string): string {
     const cleanText = (text || '').toLowerCase().replace(/\s+/g, '');
     if (!cleanText) return '';
-    const n = 2;
-    const tokens = new Set<string>();
-    if (cleanText.length < n) {
-      tokens.add(cleanText);
-    } else {
-      for (let i = 0; i <= cleanText.length - n; i++) tokens.add(cleanText.substring(i, i + n));
-    }
-    const tokenArray = Array.from(tokens);
+    const tokens = Array.from(cleanText);
+    const tokenArray = Array.from(new Set(tokens));
     if (tokenArray.length === 0) return '';
     const vector = new Array(64).fill(0);
     tokenArray.forEach(token => {
@@ -311,15 +283,4 @@ export class HashManager {
     const binaryHash = vector.map(v => v > 0 ? '1' : '0').join('');
     return BigInt('0b' + binaryHash).toString(16).padStart(16, '0');
   }
-}
-
-/**
- * @description 将十六进制字符串转换为二进制字符串的辅助函数。
- * @param hex - 十六进制字符串。
- * @returns 二进制字符串。
- */
-function hexToBinary(hex: string): string {
-  let bin = '';
-  for (const char of hex) bin += parseInt(char, 16).toString(2).padStart(4, '0');
-  return bin;
 }

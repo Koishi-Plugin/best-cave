@@ -1,4 +1,4 @@
-import { Context, Logger, h } from 'koishi';
+import { Context, Logger } from 'koishi';
 import { Config, CaveObject, StoredElement } from './index';
 import { FileManager } from './FileManager';
 import * as path from 'path';
@@ -71,40 +71,19 @@ export class AIManager {
           if (cavesToAnalyze.length === 0) return '无需分析回声洞';
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
-          let failedCount = 0;
           for (const [index, cave] of cavesToAnalyze.entries()) {
-            this.logger.info(`[${index + 1}/${cavesToAnalyze.length}] 正在分析回声洞 (${cave.id})...`);
             try {
+              this.logger.info(`[${index + 1}/${cavesToAnalyze.length}] 正在分析回声洞 (${cave.id})...`);
               await this.analyzeAndStore(cave);
               successCount++;
             } catch (error) {
-              failedCount++;
-              this.logger.error(`分析回声洞（${cave.id}）时出错:`, error);
+              return `分析回声洞（${cave.id}）时出错: ${error.message}`;
             }
           }
-          return `已分析 ${successCount} 个回声洞（失败 ${failedCount} 个）`;
+          return `已分析 ${successCount} 个回声洞`;
         } catch (error) {
           this.logger.error('分析回声洞失败:', error);
           return `操作失败: ${error.message}`;
-        }
-      });
-
-    cave.subcommand('.desc <id:posint>', '查询回声洞')
-      .action(async ({ }, id) => {
-        if (!id) return '请输入要查看的回声洞序号';
-        try {
-          const [meta] = await this.ctx.database.get('cave_meta', { cave: id });
-          if (!meta) return `回声洞（${id}）尚未分析`;
-          const report = [
-            `回声洞（${id}）分析结果：`,
-            `描述：${meta.description}`,
-            `关键词：${meta.keywords.join(', ')}`,
-            `综合评分：${meta.rating}/100`
-          ];
-          return h.text(report.join('\n'));
-        } catch (error) {
-          this.logger.error(`查询回声洞（${id}）失败:`, error);
-          return '查询失败，请稍后再试';
         }
       });
   }
@@ -232,17 +211,26 @@ export class AIManager {
       this.rateLimitResetTime = now + 60000;
       this.requestCount = 0;
     }
-    if (this.requestCount >= this.config.aiTPM) {
+    if (this.requestCount >= this.config.aiRPM) {
       const delay = this.rateLimitResetTime - now;
       await new Promise(resolve => setTimeout(resolve, delay));
       this.rateLimitResetTime = Date.now() + 60000;
       this.requestCount = 0;
     }
     let schema = JSON.parse(schemaString);
+    const toolName = 'extract_data';
     const payload = {
       model: this.config.aiModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      response_format: { type: 'json_schema', strict: true, schema },
+      tools: [{
+        type: 'function',
+        function: {
+          name: toolName,
+          description: '根据提供的内容提取或分析信息。',
+          parameters: schema,
+        },
+      }],
+      tool_choice: { type: 'function', function: { name: toolName } },
     };
     const fullUrl = `${this.config.aiEndpoint.replace(/\/$/, '')}/chat/completions`;
     const headers = {
@@ -252,7 +240,13 @@ export class AIManager {
     try {
       this.requestCount++;
       const response = await this.http.post(fullUrl, payload, { headers, timeout: 90000 });
-      return JSON.parse(response.choices[0].message.content);
+      const toolCall = response.choices?.[0]?.message?.tool_calls?.[0];
+      if (toolCall?.function?.arguments) {
+        return JSON.parse(toolCall.function.arguments);
+      } else {
+        this.logger.error('AI 响应格式不正确:', JSON.stringify(response));
+        throw new Error('AI 响应格式不正确');
+      }
     } catch (error) {
       const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
       this.logger.error(`请求 API 失败: ${errorMessage}`);
