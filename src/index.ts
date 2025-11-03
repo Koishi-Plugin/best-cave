@@ -86,10 +86,6 @@ export interface Config {
   aiApiKey?: string;
   aiModel?: string;
   aiRPM?: number;
-  AnalysePrompt?: string;
-  aiCheckPrompt?: string;
-  aiAnalyseSchema?: string;
-  aiCheckSchema?: string;
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -112,61 +108,6 @@ export const Config: Schema<Config> = Schema.intersect([
     aiApiKey: Schema.string().description('密钥 (Key)').role('secret'),
     aiModel: Schema.string().description('模型 (Model)').default('gemini-2.5-flash'),
     aiRPM: Schema.number().description('每分钟请求数 (RPM)').default(60),
-    AnalysePrompt: Schema.string().role('textarea').default(`你是一位内容分析专家。请分析我以JSON格式提供的一组内容（每项包含ID、文本和图片），为每一项内容总结关键词、概括内容并评分。你需要返回一个包含所有分析结果的JSON对象。`).description('分析 Prompt'),
-    aiAnalyseSchema: Schema.string().role('textarea').default(
-      `{
-        "type": "object",
-        "properties": {
-          "analyses": {
-            "type": "array",
-            "description": "分析结果的数组",
-            "items": {
-              "type": "object",
-              "properties": {
-                "id": {
-                  "type": "integer",
-                  "description": "内容的唯一ID"
-                },
-                "keywords": {
-                  "type": "array",
-                  "items": { "type": "string" },
-                  "description": "使用尽可能多的关键词准确形容内容"
-                },
-                "description": {
-                  "type": "string",
-                  "description": "概括或描述这部分内容"
-                },
-                "rating": {
-                  "type": "integer",
-                  "description": "对内容的综合质量进行评分",
-                  "minimum": 0,
-                  "maximum": 100
-                }
-              },
-              "required": ["id", "keywords", "description", "rating"]
-            }
-          }
-        },
-        "required": ["analyses"]
-      }`
-    ).description('分析 JSON Schema'),
-    aiCheckPrompt: Schema.string().role('textarea').default(`你是一位内容查重专家。请判断我提供的"新内容"是否与"已有内容"重复或高度相似。`).description('查重 Prompt'),
-    aiCheckSchema: Schema.string().role('textarea').default(
-      `{
-        "type": "object",
-        "properties": {
-          "duplicate": {
-            "type": "boolean",
-            "description": "新内容是否与已有内容重复"
-          },
-          "id": {
-            "type": "integer",
-            "description": "如果重复，此为第一个重复的已有内容的ID"
-          }
-        },
-        "required": ["duplicate"]
-      }`
-    ).description('查重 JSON Schema'),
   }).description('模型配置'),
   Schema.object({
     localPath: Schema.string().description('文件映射路径'),
@@ -281,7 +222,7 @@ export function apply(ctx: Context, config: Config) {
         }
         if (aiManager) {
           const duplicateResult = await aiManager.checkForDuplicates(finalElementsForDb, downloadedMedia);
-          if (duplicateResult && duplicateResult.duplicate) return `内容与回声洞（${duplicateResult.id}）重复`;
+          if (duplicateResult?.duplicate && duplicateResult.ids?.length > 0) return `内容与回声洞（${duplicateResult.ids.join('|')}）重复`;
         }
         const userName = (config.enableName ? await profileManager.getNickname(session.userId) : null) || session.username;
         const needsReview = config.enablePend && session.cid !== config.adminChannel;
@@ -298,7 +239,7 @@ export function apply(ctx: Context, config: Config) {
         if (hasMedia) finalStatus = await utils.handleFileUploads(ctx, config, fileManager, logger, newCave, downloadedMedia, reusableIds, needsReview);
         if (finalStatus !== 'preload') {
           newCave.status = finalStatus;
-          if (aiManager) await aiManager.analyzeAndStore(newCave, downloadedMedia);
+          if (aiManager) await aiManager.analyzeAndStore([newCave], downloadedMedia);
           if (hashManager) {
             const allHashesToInsert = [...textHashesToStore, ...imageHashesToStore].map(h => ({ ...h, cave: newCave.id }));
             if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);

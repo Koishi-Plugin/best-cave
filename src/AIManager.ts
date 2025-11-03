@@ -5,6 +5,16 @@ import * as path from 'path';
 import { requireAdmin } from './Utils';
 
 /**
+ * @description AI 分析返回的单个对象的数据结构。
+ */
+interface AnalysisResult {
+  id: number;
+  keywords: string[];
+  description: string;
+  rating: number;
+}
+
+/**
  * @description 定义了数据库 `cave_meta` 表的结构模型。
  * @property {number} cave - 关联的回声洞 `id`，作为外键和主键。
  * @property {string[]} keywords - AI 从回声洞内容中提取的核心关键词数组。
@@ -77,7 +87,7 @@ export class AIManager {
           for (let i = 0; i < cavesToAnalyze.length; i += batchSize) {
             const batch = cavesToAnalyze.slice(i, i + batchSize);
             this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 条回声洞...`);
-            const successCountInBatch = await this.analyzeAndStoreBatch(batch);
+            const successCountInBatch = await this.analyzeAndStore(batch);
             totalSuccessCount += successCountInBatch;
           }
           return `已分析 ${totalSuccessCount} 个回声洞`;
@@ -86,109 +96,138 @@ export class AIManager {
           return `操作失败: ${error.message}`;
         }
       });
+
+    cave.subcommand('.compare', '比较重复性', { hidden: true })
+      .usage('检查回声洞，找出可能重复的内容。')
+      .action(async ({ session }) => {
+        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        await session.send('正在检查，请稍候...');
+        try {
+          const allMeta = await this.ctx.database.get('cave_meta', {});
+          if (allMeta.length < 2) return '无可比较数据';
+          const allCaves = new Map((await this.ctx.database.get('cave', { status: 'active' })).map(c => [c.id, c]));
+          const foundPairs = new Set<string>();
+          const checkedPairs = new Set<string>();
+          for (let i = 0; i < allMeta.length; i++) {
+            for (let j = i + 1; j < allMeta.length; j++) {
+              const meta1 = allMeta[i];
+              const meta2 = allMeta[j];
+              const pairKey = [meta1.cave, meta2.cave].sort((a, b) => a - b).join('-');
+              if (checkedPairs.has(pairKey)) continue;
+              const keywords1 = new Set(meta1.keywords);
+              const keywords2 = new Set(meta2.keywords);
+              const intersection = new Set([...keywords1].filter(x => keywords2.has(x)));
+              const union = new Set([...keywords1, ...keywords2]);
+              const similarity = union.size > 0 ? intersection.size / union.size : 0;
+              if (similarity * 100 >= 80) {
+                const cave1 = allCaves.get(meta1.cave);
+                const cave2 = allCaves.get(meta2.cave);
+                if (cave1 && cave2 && await this.isContentDuplicateAI(cave1, cave2)) foundPairs.add(`${cave1.id} & ${cave2.id}`);
+                checkedPairs.add(pairKey);
+              }
+            }
+          }
+          if (foundPairs.size === 0) return '未发现高重复性的内容';
+          let report = `已发现 ${foundPairs.size} 组高重复性的内容:\n`;
+          report += [...foundPairs].join('\n');
+          return report.trim();
+        } catch (error) {
+          this.logger.error('检查重复性失败:', error);
+          return `检查失败: ${error.message}`;
+        }
+      });
   }
 
   /**
    * @description 对新提交的内容执行 AI 驱动的查重检查。
    * @param {StoredElement[]} newElements - 新提交的内容元素数组。
    * @param {{ fileName: string; buffer: Buffer }[]} [mediaBuffers] - 可选的媒体文件缓冲区数组。
-   * @returns {Promise<{ duplicate: boolean; id?: number }>} 一个 Promise，解析为一个对象，指示内容是否重复以及重复的回声洞 ID（如果存在）。
+   * @returns {Promise<{ duplicate: boolean; ids?: number[] }>} 一个 Promise，解析为一个对象，指示内容是否重复以及重复的回声洞 ID 数组（如果存在）。
    */
-  public async checkForDuplicates(newElements: StoredElement[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<{ duplicate: boolean; id?: number }> {
+  public async checkForDuplicates(newElements: StoredElement[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<{ duplicate: boolean; ids?: number[] }> {
     try {
       const dummyCave: CaveObject = { id: 0, elements: newElements, channelId: '', userId: '', userName: '', status: 'preload', time: new Date() };
+      const [newAnalysis] = await this.getAnalyses([dummyCave], mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined);
+      if (!newAnalysis?.keywords?.length) return { duplicate: false, ids: [] };
+      const allMeta = await this.ctx.database.get('cave_meta', {}, { fields: ['cave', 'keywords'] });
+      const newKeywordsSet = new Set(newAnalysis.keywords);
+      const similarCaveIds = allMeta.filter(meta => {
+        if (!meta.keywords?.length) return false;
+        const existingKeywordsSet = new Set(meta.keywords);
+        const intersection = new Set([...newKeywordsSet].filter(x => existingKeywordsSet.has(x)));
+        const union = new Set([...newKeywordsSet, ...existingKeywordsSet]);
+        const similarity = union.size > 0 ? intersection.size / union.size : 0;
+        return similarity * 100 >= 80;
+      }).map(meta => meta.cave);
+      if (similarCaveIds.length === 0) return { duplicate: false, ids: [] };
+      const potentialDuplicates = await this.ctx.database.get('cave', { id: { $in: similarCaveIds } });
+      const duplicateIds: number[] = [];
+      for (const existingCave of potentialDuplicates) if (await this.isContentDuplicateAI(dummyCave, existingCave)) duplicateIds.push(existingCave.id);
+      return { duplicate: duplicateIds.length > 0, ids: duplicateIds };
+    } catch (error) {
+      this.logger.error('查重回声洞出错:', error);
+      return { duplicate: false, ids: [] };
+    }
+  }
+
+  /**
+   * @description 对单个或批量回声洞执行完整的分析和存储流程。
+   * @param {CaveObject[]} caves - 要分析的回声洞对象数组。
+   * @param {{ fileName: string; buffer: Buffer }[]} [mediaBuffers] - 可选的媒体文件缓冲区数组，仅在分析新内容时使用。
+   * @returns {Promise<number>} 一个 Promise，解析为成功分析和存储的条目数。
+   */
+  public async analyzeAndStore(caves: CaveObject[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<number> {
+    try {
       const mediaMap = mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined;
-      const [newAnalysis] = await this.getAnalyses([dummyCave], mediaMap);
-      if (!newAnalysis?.keywords?.length) return { duplicate: false };
-      const potentialDuplicates = await this.findPotentialDuplicates(newAnalysis.keywords);
-      if (potentialDuplicates.length === 0) return { duplicate: false };
-      const formatContent = (elements: StoredElement[]) => elements.filter(el => el.type === 'text').map(el => el.content as string).join(' ');
+      const results = await this.getAnalyses(caves, mediaMap);
+      if (!results?.length) return 0;
+      const caveMetaObjects = results.map(res => ({
+        cave: res.id,
+        keywords: res.keywords || [],
+        description: res.description || '',
+        rating: Math.max(0, Math.min(100, res.rating || 0)),
+      }));
+      await this.ctx.database.upsert('cave_meta', caveMetaObjects);
+      return caveMetaObjects.length;
+    } catch (error) {
+      const caveIds = caves.map(c => c.id).join(', ');
+      this.logger.error(`分析回声洞 (${caveIds}) 出错:`, error);
+      return 0;
+    }
+  }
+
+  /**
+   * @description 调用 AI 判断两个回声洞内容是否重复或高度相似。
+   * @param {CaveObject} caveA - 第一个回声洞对象。
+   * @param {CaveObject} caveB - 第二个回声洞对象。
+   * @returns {Promise<boolean>} 如果内容相似则返回 true，否则返回 false。
+   */
+  private async isContentDuplicateAI(caveA: CaveObject, caveB: CaveObject): Promise<boolean> {
+    try {
+      const formatContent = (elements: StoredElement[]) => elements.filter(el => el.type === 'text' && el.content).map(el => el.content as string).join(' ');
       const userMessage = {
         role: 'user',
         content: JSON.stringify({
-          new_content: { text: formatContent(newElements) },
-          existing_contents: potentialDuplicates.map(cave => ({ id: cave.id, text: formatContent(cave.elements) })),
+          content_a: { id: caveA.id, text: formatContent(caveA.elements) },
+          content_b: { id: caveB.id, text: formatContent(caveB.elements) },
         })
       };
-      const response = await this.requestAI([userMessage], this.config.aiCheckPrompt, this.config.aiCheckSchema);
-      return {
-        duplicate: response.duplicate || false,
-        id: response.id ? Number(response.id) : undefined,
-      };
+      const prompt = `你是一位内容查重专家。请判断 content_a 和 content_b 是否重复或高度相似。你的回复必须且只能是一个包裹在 \`\`\`json ... \`\`\` 代码块中的 JSON 对象，该对象仅包含一个键 "duplicate" (布尔值)。`;
+      const response = await this.requestAI<{ duplicate?: boolean }>([userMessage], prompt);
+      return response.duplicate || false;
     } catch (error) {
-      this.logger.error('查重回声洞出错:', error);
-      return { duplicate: false };
+      this.logger.error(`比较回声洞（${caveA.id}）与（${caveB.id}）失败:`, error);
+      return false;
     }
-  }
-
-  /**
-   * @description 对单个回声洞对象执行完整的分析和存储流程。
-   * @param {CaveObject} cave - 要分析的回声洞对象。
-   * @param {{ fileName: string; buffer: Buffer }[]} [mediaBuffers] - 可选的媒体文件缓冲区数组，用于新提交内容的分析。
-   * @returns {Promise<void>} 分析和存储操作完成后解析的 Promise。
-   */
-  public async analyzeAndStore(cave: CaveObject, mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<void> {
-    try {
-      const mediaMap = mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined;
-      const [result] = await this.getAnalyses([cave], mediaMap);
-      if (result) {
-        await this.ctx.database.upsert('cave_meta', [{
-          cave: cave.id,
-          keywords: result.keywords || [],
-          description: result.description || '',
-          rating: Math.max(0, Math.min(100, result.rating || 0)),
-        }]);
-      }
-    } catch (error) {
-      this.logger.error(`分析回声洞（${cave.id}）出错:`, error);
-    }
-  }
-
-  /**
-   * @description 对一批回声洞执行分析并存储结果。
-   * @param {CaveObject[]} caves - 要分析的回声洞对象数组。
-   * @returns {Promise<number>} 一个 Promise，解析为成功分析和存储的条目数。
-   */
-  private async analyzeAndStoreBatch(caves: CaveObject[]): Promise<number> {
-    const results = await this.getAnalyses(caves);
-    if (!results?.length) return 0;
-    const caveMetaObjects = results.map(res => ({
-      cave: res.id,
-      keywords: res.keywords || [],
-      description: res.description || '',
-      rating: Math.max(0, Math.min(100, res.rating || 0)),
-    }));
-    await this.ctx.database.upsert('cave_meta', caveMetaObjects);
-    return caveMetaObjects.length;
-  }
-
-  /**
-   * @description 根据新内容的关键词，查找并返回可能重复的回声洞。
-   * @param {string[]} newKeywords - 新内容的关键词数组。
-   * @returns {Promise<CaveObject[]>} 一个 Promise，解析为可能重复的回声洞对象数组。
-   */
-  private async findPotentialDuplicates(newKeywords: string[]): Promise<CaveObject[]> {
-    const allMeta = await this.ctx.database.get('cave_meta', {}, { fields: ['cave', 'keywords'] });
-    const newKeywordsSet = new Set(newKeywords);
-    const similarCaveIds = allMeta.filter(meta => {
-      if (!meta.keywords?.length) return false;
-      const existingKeywordsSet = new Set(meta.keywords);
-      const intersection = new Set([...newKeywordsSet].filter(x => existingKeywordsSet.has(x)));
-      const union = new Set([...newKeywordsSet, ...existingKeywordsSet]);
-      const similarity = union.size > 0 ? intersection.size / union.size : 0;
-      return similarity * 100 >= 80;
-    }).map(meta => meta.cave);
-    if (similarCaveIds.length === 0) return [];
-    return this.ctx.database.get('cave', { id: { $in: similarCaveIds } });
   }
 
   /**
    * @description 为一批回声洞准备内容，并向 AI 发送单个请求以获取所有分析结果。
    * @param {CaveObject[]} caves - 要分析的回声洞对象数组。
    * @param {Map<string, Buffer>} [mediaBufferMap] - 可选的媒体文件名到其缓冲区的映射。
-   * @returns {Promise<any[]>} 一个 Promise，解析为 AI 返回的分析结果数组。
+   * @returns {Promise<AnalysisResult[]>} 一个 Promise，解析为 AI 返回的分析结果数组。
    */
-  private async getAnalyses(caves: CaveObject[], mediaBufferMap?: Map<string, Buffer>): Promise<any[]> {
+  private async getAnalyses(caves: CaveObject[], mediaBufferMap?: Map<string, Buffer>): Promise<AnalysisResult[]> {
     const batchPayload = await Promise.all(caves.map(async (cave) => {
       const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content as string).join('\n');
       const imagesBase64 = (await Promise.all(cave.elements
@@ -209,15 +248,19 @@ export class AIManager {
     const nonEmptyPayload = batchPayload.filter(p => p.text.trim() || p.images.length > 0);
     if (nonEmptyPayload.length === 0) return [];
     const userMessage = { role: 'user', content: JSON.stringify(nonEmptyPayload) };
-    const response = await this.requestAI([userMessage], this.config.AnalysePrompt, this.config.aiAnalyseSchema);
+    const analysePrompt = `你是一位内容分析专家。请使用中文，分析我以JSON格式提供的一组内容，为每一项内容总结关键词、概括内容并评分。你的回复必须且只能是一个包裹在 \`\`\`json ... \`\`\` 代码块中的有效 JSON 对象。该JSON对象应有一个 "analyses" 键，其值为一个数组。数组中的每个对象都必须包含 "id" (整数), "keywords" (字符串数组), "description" (字符串), 和 "rating" (0-100的整数)。`;
+    const response = await this.requestAI<{ analyses?: AnalysisResult[] }>([userMessage], analysePrompt);
     return response.analyses || [];
   }
 
   /**
-   * @description 确保请求不会超过设定的速率限制（RPM）。如果需要，会延迟执行。
-   * @returns {Promise<void>} 当可以继续发送请求时解析的 Promise。
+   * @description 封装了向 OpenAI 兼容的 API 发送请求的底层逻辑，并稳健地解析 JSON 响应。
+   * @param {any[]} messages - 发送给 AI 的消息数组，遵循 OpenAI 格式。
+   * @param {string} systemPrompt - 系统提示词，用于指导 AI 的行为。
+   * @returns {Promise<T>} 一个 Promise，解析为从 AI 接收到的、解析后的 JSON 对象。
+   * @throws {Error} 当 AI 返回空或无效内容时抛出错误。
    */
-  private async ensureRateLimit(): Promise<void> {
+  private async requestAI<T>(messages: any[], systemPrompt: string): Promise<T> {
     const now = Date.now();
     if (now > this.rateLimitResetTime) {
       this.rateLimitResetTime = now + 60000;
@@ -229,29 +272,9 @@ export class AIManager {
       this.rateLimitResetTime = Date.now() + 60000;
       this.requestCount = 0;
     }
-  }
-
-  /**
-   * @description 封装了向 OpenAI 兼容的 API 发送请求的底层逻辑。
-   * @param {any[]} messages - 发送给 AI 的消息数组，遵循 OpenAI 格式。
-   * @param {string} systemPrompt - 系统提示词，用于指导 AI 的行为。
-   * @param {string} schemaString - 定义期望响应格式的 JSON Schema 字符串。
-   * @returns {Promise<any>} 一个 Promise，解析为从 AI 接收到的、解析后的 JSON 对象。
-   * @throws {Error} 当 AI 返回空或无效内容时抛出错误。
-   */
-  private async requestAI(messages: any[], systemPrompt: string, schemaString: string): Promise<any> {
-    await this.ensureRateLimit();
     const payload = {
       model: this.config.aiModel,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'extract_data',
-          description: '根据提供的内容提取或分析信息。',
-          schema: JSON.parse(schemaString),
-        },
-      },
     };
     const fullUrl = `${this.config.aiEndpoint.replace(/\/$/, '')}/chat/completions`;
     const headers = {
@@ -261,7 +284,21 @@ export class AIManager {
     this.requestCount++;
     const response = await this.http.post(fullUrl, payload, { headers, timeout: 90000 });
     const content = response.choices?.[0]?.message?.content;
-    if (typeof content === 'string' && content.trim()) return JSON.parse(content);
-    throw new Error('响应无效');
+    if (typeof content !== 'string' || !content.trim()) throw new Error('响应无效');
+    try {
+      const jsonRegex = /```json\s*([\s\S]*?)\s*```/;
+      const match = content.match(jsonRegex);
+      let jsonString = '';
+      if (match && match[1]) {
+        jsonString = match[1];
+      } else {
+        jsonString = content;
+      }
+      return JSON.parse(jsonString);
+    } catch (error) {
+      this.logger.error('解析 JSON 失败:', error);
+      this.logger.error('原始响应:', content);
+      throw new Error('解析失败');
+    }
   }
 }
