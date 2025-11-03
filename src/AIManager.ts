@@ -212,38 +212,47 @@ export class AIManager {
    * @returns {Promise<CaveMetaObject[]>} 一个 Promise，解析为 AI 返回的分析结果数组。
    */
   private async getAnalyses(caves: CaveObject[], mediaBufferMap?: Map<string, Buffer>): Promise<CaveMetaObject[]> {
-    const batchPayload = await Promise.all(caves.map(async (cave) => {
-      const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content as string).join('\n');
-      const imagesBase64 = (await Promise.all(cave.elements
-        .filter(el => el.type === 'image' && el.file)
-        .map(async (el) => {
-          try {
-            const buffer = mediaBufferMap?.get(el.file) ?? await this.fileManager.readFile(el.file);
-            const mimeType = path.extname(el.file).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
-            return `data:${mimeType};base64,${buffer.toString('base64')}`;
-          } catch (error) {
-            this.logger.warn(`读取文件（${el.file}）失败:`, error);
-            return null;
-          }
-        })
-      )).filter(Boolean);
-      return { id: cave.id, text: combinedText, images: imagesBase64 };
-    }));
-    const nonEmptyPayloads = batchPayload.filter(p => p.text.trim() || p.images.length > 0);
-    if (nonEmptyPayloads.length === 0) return [];
-    const contentForAI = [];
-    const textData = nonEmptyPayloads.map(({ id, text }) => ({ id, text }));
-    contentForAI.push({ type: 'text', text: JSON.stringify(textData) });
-    nonEmptyPayloads.forEach(payload => { payload.images.forEach(imageBase64Url => { contentForAI.push({ type: 'image_url', image_url: { url: imageBase64Url } }) }) });
-    const userMessage = { role: 'user', content: contentForAI };
-    const analysePrompt = `你是一位内容分析专家。请使用中文，分析我以JSON格式提供的一组内容（位于消息的第一个 text 部分），并结合可能附带的图片，为每一项内容总结关键词、概括内容并评分。你的回复必须且只能是一个包裹在 \`\`\`json ... \`\`\` 代码块中的有效 JSON 对象。该JSON对象应有一个 "analyses" 键，其值为一个数组。数组中的每个对象都必须包含 "id" (整数), "keywords" (字符串数组), "description" (字符串), 和 "rating" (0-100的整数)。`;
-    const response = await this.requestAI<{ analyses?: { id: number; keywords: string[]; description: string; rating: number; }[] }>([userMessage], analysePrompt);
-    return (response.analyses || []).map(res => ({
-      cave: res.id,
-      keywords: res.keywords,
-      description: res.description,
-      rating: res.rating
-    }));
+    const results: CaveMetaObject[] = [];
+    for (const cave of caves) {
+      try {
+        const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content as string).join('\n');
+        const imageElements = await Promise.all(
+          cave.elements
+            .filter(el => el.type === 'image' && el.file)
+            .map(async (el) => {
+              try {
+                const buffer = mediaBufferMap?.get(el.file) ?? await this.fileManager.readFile(el.file);
+                const mimeType = path.extname(el.file).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
+                return {
+                  type: 'image_url',
+                  image_url: { url: `data:${mimeType};base64,${buffer.toString('base64')}` },
+                };
+              } catch (error) {
+                this.logger.warn(`读取文件（${el.file}）失败:`, error);
+                return null;
+              }
+            })
+        );
+        const validImages = imageElements.filter(Boolean);
+        if (!combinedText.trim() && validImages.length === 0) continue;
+        const contentForAI: any[] = [{ type: 'text', text: combinedText }];
+        contentForAI.push(...validImages);
+        const userMessage = { role: 'user', content: contentForAI };
+        const analysePrompt = `你是一位内容分析专家。请使用中文，分析我提供的内容（包含文本和可能的图片），并为其总结关键词、概括内容并评分。你的回复必须且只能是一个包裹在 \`\`\`json ... \`\`\` 代码块中的有效 JSON 对象。该对象必须包含 "keywords" (字符串数组), "description" (字符串), 和 "rating" (0-100的整数)。`;
+        const response = await this.requestAI<{ keywords: string[]; description: string; rating: number; }>([userMessage], analysePrompt);
+        if (response) {
+          results.push({
+            cave: cave.id,
+            keywords: response.keywords || [],
+            description: response.description || '',
+            rating: response.rating || 0,
+          });
+        }
+      } catch (error) {
+        this.logger.error(`分析回声洞（${cave.id}）失败:`, error);
+      }
+    }
+    return results;
   }
 
   /**
