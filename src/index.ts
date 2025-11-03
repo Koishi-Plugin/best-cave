@@ -194,7 +194,7 @@ export function apply(ctx: Context, config: Config) {
       if (staleCaves.length > 0) {
         const idsToMark = staleCaves.map(c => ({ id: c.id, status: 'delete' as const }));
         await ctx.database.upsert('cave', idsToMark);
-        await utils.cleanupPendingDeletions(ctx, fileManager, logger, reusableIds);
+        await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
       }
     } catch (error) {
       logger.error('清理残留回声洞时发生错误:', error);
@@ -281,7 +281,7 @@ export function apply(ctx: Context, config: Config) {
           time: creationTime,
         });
         if (hasMedia) finalStatus = await utils.handleFileUploads(ctx, config, fileManager, logger, newCave, downloadedMedia, reusableIds, session);
-        if (finalStatus !== 'preload' && finalStatus !== 'delete') {
+        if (finalStatus !== 'preload') {
           newCave.status = finalStatus;
           if (aiManager) await aiManager.analyzeAndStore(newCave, downloadedMedia);
           if (hashManager) {
@@ -324,8 +324,8 @@ export function apply(ctx: Context, config: Config) {
         if (!isAuthor && !isAdmin) return '你没有权限删除这条回声洞';
         await ctx.database.upsert('cave', [{ id, status: 'delete' }]);
         const caveMessages = await utils.buildCaveMessage(targetCave, config, fileManager, logger, session.platform, '已删除');
-        utils.cleanupPendingDeletions(ctx, fileManager, logger, reusableIds);
         for (const message of caveMessages) if (message.length > 0) await session.send(h.normalize(message));
+        utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
       } catch (error) {
         logger.error(`标记回声洞（${id}）失败:`, error);
         return '删除失败，请稍后再试';

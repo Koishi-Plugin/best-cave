@@ -64,7 +64,7 @@ export class PendManager {
         if (cavesToProcess.length === 0) return `回声洞（${idsToProcess.join('|')}）无需审核或不存在`;
         const processedIds = cavesToProcess.map(cave => cave.id);
         await this.ctx.database.upsert('cave', processedIds.map(id => ({ id, status: targetStatus })));
-        if (targetStatus === 'delete') cleanupPendingDeletions(this.ctx, this.fileManager, this.logger, this.reusableIds);
+        if (targetStatus === 'delete') cleanupPendingDeletions(this.ctx, this.config, this.fileManager, this.logger, this.reusableIds);
         return `已${actionText}回声洞（${processedIds.join('|')}）`;
       } catch (error) {
         this.logger.error(`审核操作失败:`, error);

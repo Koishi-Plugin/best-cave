@@ -49,7 +49,7 @@ export class HashManager {
    * @param cave - 主 `cave` 命令实例。
    */
   public registerCommands(cave) {
-    cave.subcommand('.hash', '校验回声洞', { hidden: true , authority: 3 })
+    cave.subcommand('.hash', '校验回声洞', { hidden: true, authority: 3 })
       .usage('校验缺失哈希的回声洞，补全哈希记录。')
       .action(async ({ session }) => {
         if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
@@ -106,33 +106,41 @@ export class HashManager {
           const textThreshold = options.textThreshold ?? this.config.textThreshold;
           const imageThreshold = options.imageThreshold ?? this.config.imageThreshold;
           const allHashes = await this.ctx.database.get('cave_hash', {});
-          const allCaveIds = [...new Set(allHashes.map(h => h.cave))];
-          const textHashes = new Map<number, string>();
-          const imageHashes = new Map<number, string>();
-          for (const hash of allHashes) {
-            if (hash.type === 'text') {
-              textHashes.set(hash.cave, hash.hash);
-            } else if (hash.type === 'image') {
-              imageHashes.set(hash.cave, hash.hash);
+          if (allHashes.length < 2) return '无可比较哈希';
+          const buckets = new Map<string, number[]>();
+          const hashLookup = new Map<number, { text?: string, image?: string }>();
+          for (const hashObj of allHashes) {
+            if (!hashLookup.has(hashObj.cave)) hashLookup.set(hashObj.cave, {});
+            hashLookup.get(hashObj.cave)[hashObj.type] = hashObj.hash;
+            const binHash = BigInt('0x' + hashObj.hash).toString(2).padStart(64, '0');
+            for (let i = 0; i < 4; i++) {
+              const band = binHash.substring(i * 16, (i + 1) * 16);
+              const bucketKey = `${hashObj.type}:${i}:${band}`;
+              if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
+              buckets.get(bucketKey).push(hashObj.cave);
             }
           }
+          const candidatePairs = new Set<string>();
           const similarPairs = { text: new Set<string>(), image: new Set<string>() };
-          for (let i = 0; i < allCaveIds.length; i++) {
-            for (let j = i + 1; j < allCaveIds.length; j++) {
-              const id1 = allCaveIds[i];
-              const id2 = allCaveIds[j];
-              const pair = [id1, id2].sort((a, b) => a - b).join(' & ');
-              const text1 = textHashes.get(id1);
-              const text2 = textHashes.get(id2);
-              if (text1 && text2) {
-                const similarity = this.calculateSimilarity(text1, text2);
-                if (similarity >= textThreshold) similarPairs.text.add(`${pair} = ${similarity.toFixed(2)}%`);
-              }
-              const image1 = imageHashes.get(id1);
-              const image2 = imageHashes.get(id2);
-              if (image1 && image2) {
-                const similarity = this.calculateSimilarity(image1, image2);
-                if (similarity >= imageThreshold) similarPairs.image.add(`${pair} = ${similarity.toFixed(2)}%`);
+          for (const ids of buckets.values()) {
+            if (ids.length < 2) continue;
+            for (let i = 0; i < ids.length; i++) {
+              for (let j = i + 1; j < ids.length; j++) {
+                const id1 = ids[i];
+                const id2 = ids[j];
+                const pairKey = [id1, id2].sort((a, b) => a - b).join('-');
+                if (candidatePairs.has(pairKey)) continue;
+                candidatePairs.add(pairKey);
+                const cave1Hashes = hashLookup.get(id1);
+                const cave2Hashes = hashLookup.get(id2);
+                if (cave1Hashes?.text && cave2Hashes?.text) {
+                  const similarity = this.calculateSimilarity(cave1Hashes.text, cave2Hashes.text);
+                  if (similarity >= textThreshold) similarPairs.text.add(`${id1} & ${id2} = ${similarity.toFixed(2)}%`);
+                }
+                if (cave1Hashes?.image && cave2Hashes?.image) {
+                  const similarity = this.calculateSimilarity(cave1Hashes.image, cave2Hashes.image);
+                  if (similarity >= imageThreshold) similarPairs.image.add(`${id1} & ${id2} = ${similarity.toFixed(2)}%`);
+                }
               }
             }
           }
@@ -145,6 +153,71 @@ export class HashManager {
         } catch (error) {
           this.logger.error('检查相似度失败:', error);
           return `检查失败: ${error.message}`;
+        }
+      });
+
+    cave.subcommand('.fix [...ids:posint]', '修复回声洞', { hidden: true, authority: 3 })
+      .usage('扫描并修复回声洞中的图片，可指定一个或多个 ID。')
+      .action(async ({ session }, ...ids: number[]) => {
+        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        let cavesToProcess: CaveObject[];
+        try {
+          if (ids.length === 0) {
+            await session.send('正在修复，请稍候...');
+            cavesToProcess = await this.ctx.database.get('cave', { status: 'active' });
+          } else {
+            cavesToProcess = await this.ctx.database.get('cave', { id: { $in: ids }, status: 'active' });
+          }
+          if (!cavesToProcess.length) return '无可修复回声洞';
+          let fixedFiles = 0;
+          let errorCount = 0;
+          const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+          const JPEG_SIGNATURE = Buffer.from([0xFF, 0xD8]);
+          const GIF_SIGNATURE = Buffer.from('GIF');
+          for (const cave of cavesToProcess) {
+            const imageElements = cave.elements.filter(el => el.type === 'image' && el.file);
+            for (const element of imageElements) {
+              try {
+                const originalBuffer = await this.fileManager.readFile(element.file);
+                let sanitizedBuffer = originalBuffer;
+                if (originalBuffer.slice(0, 8).equals(PNG_SIGNATURE)) {
+                    const IEND_CHUNK = Buffer.from('IEND');
+                    const iendIndex = originalBuffer.lastIndexOf(IEND_CHUNK);
+                    if (iendIndex !== -1) {
+                        const endOfPngData = iendIndex + 8;
+                        if (originalBuffer.length > endOfPngData) sanitizedBuffer = originalBuffer.slice(0, endOfPngData);
+                    }
+                } else if (originalBuffer.slice(0, 2).equals(JPEG_SIGNATURE)) {
+                    const EOI_MARKER = Buffer.from([0xFF, 0xD9]);
+                    const eoiIndex = originalBuffer.lastIndexOf(EOI_MARKER);
+                    if (eoiIndex !== -1) {
+                        const endOfJpegData = eoiIndex + 2;
+                        if (originalBuffer.length > endOfJpegData) sanitizedBuffer = originalBuffer.slice(0, endOfJpegData);
+                    }
+                } else if (originalBuffer.slice(0, 3).equals(GIF_SIGNATURE)) {
+                    const GIF_TERMINATOR = Buffer.from([0x3B]);
+                    const terminatorIndex = originalBuffer.lastIndexOf(GIF_TERMINATOR);
+                    if (terminatorIndex !== -1) {
+                        const endOfGifData = terminatorIndex + 1;
+                        if (originalBuffer.length > endOfGifData) sanitizedBuffer = originalBuffer.slice(0, endOfGifData);
+                    }
+                }
+                if (!originalBuffer.equals(sanitizedBuffer)) {
+                  await this.fileManager.saveFile(element.file, sanitizedBuffer);
+                  fixedFiles++;
+                }
+              } catch (error) {
+                if (error.code !== 'ENOENT' && error.name !== 'NoSuchKey') {
+                   this.logger.warn(`无法修复回声洞（${cave.id}）的图片（${element.file}）:`, error);
+                   errorCount++;
+                }
+              }
+            }
+          }
+          return `已修复 ${cavesToProcess.length} 个回声洞的 ${fixedFiles} 张图片（失败 ${errorCount} 条）`;
+        } catch (error) {
+          this.logger.error('修复图像文件时发生严重错误:', error);
+          return `操作失败: ${error.message}`;
         }
       });
   }
@@ -174,8 +247,9 @@ export class HashManager {
         const imageBuffer = await this.fileManager.readFile(el.file);
         const imageHash = await this.generatePHash(imageBuffer);
         addUniqueHash({ cave: cave.id, hash: imageHash, type: 'image' });
-      } catch (e) {
-        this.logger.warn(`无法为回声洞（${cave.id}）的图片（${el.file}）生成哈希:`, e);
+      } catch (error) {
+        this.logger.warn(`无法为回声洞（${cave.id}）的图片（${el.file}）生成哈希:`, error);
+        throw error;
       }
     }
     return tempHashes;

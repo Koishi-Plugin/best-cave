@@ -137,7 +137,7 @@ export async function buildCaveMessage(cave: CaveObject, config: Config, fileMan
  * @param logger 日志记录器实例。
  * @param reusableIds 可复用 ID 的内存缓存。
  */
-export async function cleanupPendingDeletions(ctx: Context, fileManager: FileManager, logger: Logger, reusableIds: Set<number>): Promise<void> {
+export async function cleanupPendingDeletions(ctx: Context, config: Config, fileManager: FileManager, logger: Logger, reusableIds: Set<number>): Promise<void> {
   try {
     const cavesToDelete = await ctx.database.get('cave', { status: 'delete' });
     if (!cavesToDelete.length) return;
@@ -147,7 +147,7 @@ export async function cleanupPendingDeletions(ctx: Context, fileManager: FileMan
     idsToDelete.forEach(id => reusableIds.add(id));
     await ctx.database.remove('cave', { id: { $in: idsToDelete } });
     await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
-    await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
+    if (config.enableAI) await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
   } catch (error) {
     logger.error('清理回声洞时发生错误:', error);
   }
@@ -339,7 +339,7 @@ export async function performSimilarityChecks(ctx: Context, config: Config, hash
 export async function handleFileUploads(
   ctx: Context, config: Config, fileManager: FileManager, logger: Logger, cave: CaveObject,
   downloadedMedia: { fileName: string, buffer: Buffer }[], reusableIds: Set<number>, session: Session
-): Promise<'pending' | 'active' | 'delete'> {
+): Promise<'pending' | 'active'> {
   try {
     await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
     const needsReview = config.enablePend && session.channelId !== config.adminChannel?.split(':')[1];
@@ -349,8 +349,8 @@ export async function handleFileUploads(
   } catch (fileProcessingError) {
     logger.error(`回声洞（${cave.id}）文件处理失败:`, fileProcessingError);
     await ctx.database.upsert('cave', [{ id: cave.id, status: 'delete' }]);
-    cleanupPendingDeletions(ctx, fileManager, logger, reusableIds);
-    return 'delete';
+    cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+    throw fileProcessingError;
   }
 }
 
