@@ -5,16 +5,6 @@ import * as path from 'path';
 import { requireAdmin } from './Utils';
 
 /**
- * @description AI 分析返回的单个对象的数据结构。
- */
-interface AnalysisResult {
-  id: number;
-  keywords: string[];
-  description: string;
-  rating: number;
-}
-
-/**
  * @description 定义了数据库 `cave_meta` 表的结构模型。
  * @property {number} cave - 关联的回声洞 `id`，作为外键和主键。
  * @property {string[]} keywords - AI 从回声洞内容中提取的核心关键词数组。
@@ -182,7 +172,7 @@ export class AIManager {
       const results = await this.getAnalyses(caves, mediaMap);
       if (!results?.length) return 0;
       const caveMetaObjects = results.map(res => ({
-        cave: res.id,
+        cave: res.cave,
         keywords: res.keywords || [],
         description: res.description || '',
         rating: Math.max(0, Math.min(100, res.rating || 0)),
@@ -225,9 +215,9 @@ export class AIManager {
    * @description 为一批回声洞准备内容，并向 AI 发送单个请求以获取所有分析结果。
    * @param {CaveObject[]} caves - 要分析的回声洞对象数组。
    * @param {Map<string, Buffer>} [mediaBufferMap] - 可选的媒体文件名到其缓冲区的映射。
-   * @returns {Promise<AnalysisResult[]>} 一个 Promise，解析为 AI 返回的分析结果数组。
+   * @returns {Promise<CaveMetaObject[]>} 一个 Promise，解析为 AI 返回的分析结果数组。
    */
-  private async getAnalyses(caves: CaveObject[], mediaBufferMap?: Map<string, Buffer>): Promise<AnalysisResult[]> {
+  private async getAnalyses(caves: CaveObject[], mediaBufferMap?: Map<string, Buffer>): Promise<CaveMetaObject[]> {
     const batchPayload = await Promise.all(caves.map(async (cave) => {
       const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content as string).join('\n');
       const imagesBase64 = (await Promise.all(cave.elements
@@ -249,8 +239,13 @@ export class AIManager {
     if (nonEmptyPayload.length === 0) return [];
     const userMessage = { role: 'user', content: JSON.stringify(nonEmptyPayload) };
     const analysePrompt = `你是一位内容分析专家。请使用中文，分析我以JSON格式提供的一组内容，为每一项内容总结关键词、概括内容并评分。你的回复必须且只能是一个包裹在 \`\`\`json ... \`\`\` 代码块中的有效 JSON 对象。该JSON对象应有一个 "analyses" 键，其值为一个数组。数组中的每个对象都必须包含 "id" (整数), "keywords" (字符串数组), "description" (字符串), 和 "rating" (0-100的整数)。`;
-    const response = await this.requestAI<{ analyses?: AnalysisResult[] }>([userMessage], analysePrompt);
-    return response.analyses || [];
+    const response = await this.requestAI<{ analyses?: { id: number; keywords: string[]; description: string; rating: number; }[] }>([userMessage], analysePrompt);
+    return (response.analyses || []).map(res => ({
+      cave: res.id,
+      keywords: res.keywords,
+      description: res.description,
+      rating: res.rating
+    }));
   }
 
   /**
@@ -284,10 +279,10 @@ export class AIManager {
     this.requestCount++;
     const response = await this.http.post(fullUrl, payload, { headers, timeout: 90000 });
     const content = response.choices?.[0]?.message?.content;
-    if (typeof content !== 'string' || !content.trim()) throw new Error('响应无效');
+    this.logger.info('原始响应:', content);
     try {
       const jsonRegex = /```json\s*([\s\S]*?)\s*```/;
-      const match = content.match(jsonRegex);
+      const match = content?.match(jsonRegex);
       let jsonString = '';
       if (match && match[1]) {
         jsonString = match[1];
