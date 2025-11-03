@@ -55,42 +55,29 @@ export class HashManager {
         if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
         try {
           const allCaves = await this.ctx.database.get('cave', { status: 'active' });
-          if (allCaves.length === 0) return '无需补全回声洞哈希';
-          await session.send(`开始补全 ${allCaves.length} 个回声洞的哈希...`);
-          const existingHashes = await this.ctx.database.get('cave_hash', {});
-          const existingHashSet = new Set(existingHashes.map(h => `${h.cave}-${h.hash}-${h.type}`));
-          let hashesToInsert: CaveHashObject[] = [];
+          const existingHashes = await this.ctx.database.get('cave_hash', {}, { fields: ['cave'] });
+          const hashedCaveIds = new Set(existingHashes.map(h => h.cave));
+          const cavesToProcess = allCaves.filter(cave => !hashedCaveIds.has(cave.id));
+          if (cavesToProcess.length === 0) return '无需补全回声洞哈希';
+          await session.send(`开始补全 ${cavesToProcess.length} 个回声洞的哈希...`);
+          const hashesToInsert: CaveHashObject[] = [];
           let processedCaveCount = 0;
-          let totalHashesGenerated = 0;
           let errorCount = 0;
-          const flushBatch = async () => {
-            if (hashesToInsert.length === 0) return;
-            await this.ctx.database.upsert('cave_hash', hashesToInsert);
-            totalHashesGenerated += hashesToInsert.length;
-            this.logger.info(`[${processedCaveCount}/${allCaves.length}] 正在导入 ${hashesToInsert.length} 条回声洞哈希...`);
-            hashesToInsert = [];
-          };
-          for (const cave of allCaves) {
+          for (const cave of cavesToProcess) {
             processedCaveCount++;
             try {
               const newHashesForCave = await this.generateAllHashesForCave(cave);
-              for (const hashObj of newHashesForCave) {
-                const uniqueKey = `${hashObj.cave}-${hashObj.hash}-${hashObj.type}`;
-                if (!existingHashSet.has(uniqueKey)) {
-                  hashesToInsert.push(hashObj);
-                  existingHashSet.add(uniqueKey);
-                }
-              }
-              if (hashesToInsert.length >= 100) await flushBatch();
+              if (newHashesForCave.length > 0) hashesToInsert.push(...newHashesForCave);
             } catch (error) {
               errorCount++;
               this.logger.warn(`补全回声洞（${cave.id}）哈希时出错: ${error.message}`);
             }
           }
-          await flushBatch();
-          return `已补全 ${allCaves.length} 个回声洞的 ${totalHashesGenerated} 条哈希（失败 ${errorCount} 条）`;
+          if (hashesToInsert.length > 0) await this.ctx.database.upsert('cave_hash', hashesToInsert);
+          const successCount = processedCaveCount - errorCount;
+          return `已补全 ${successCount} 个回声洞的 ${hashesToInsert.length} 条哈希（失败 ${errorCount} 条）`;
         } catch (error) {
-          this.logger.error('生成哈希失败:', error);
+          this.logger.error('补全哈希失败:', error);
           return `操作失败: ${error.message}`;
         }
       });
@@ -162,13 +149,13 @@ export class HashManager {
         if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
         let cavesToProcess: CaveObject[];
         try {
+          await session.send('正在修复，请稍候...');
           if (ids.length === 0) {
-            await session.send('正在修复，请稍候...');
             cavesToProcess = await this.ctx.database.get('cave', { status: 'active' });
           } else {
             cavesToProcess = await this.ctx.database.get('cave', { id: { $in: ids }, status: 'active' });
           }
-          if (!cavesToProcess.length) return '无可修复回声洞';
+          if (!cavesToProcess.length) return '无可修复的回声洞';
           let fixedFiles = 0;
           let errorCount = 0;
           const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
