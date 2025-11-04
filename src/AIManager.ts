@@ -299,17 +299,17 @@ export class AIManager {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${this.config.aiApiKey}`
     };
-    const response = await this.http.post(fullUrl, payload, { headers, timeout: 180000 });
+    const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
     const content = response?.choices?.[0]?.message?.content;
     if (typeof content !== 'string' || !content.trim()) throw new Error;
     try {
-      const jsonRegex = /```json\s*([\s\S]*?)\s*```/;
+      const jsonRegex = /```json\s*([\s\S]*?)\s*```/i;
       const match = content.match(jsonRegex);
       const jsonString = (match && match[1]) ? match[1] : content;
       return JSON.parse(jsonString);
     } catch (error) {
-      this.logger.error('解析 AI 响应 JSON 失败:', error, '原始响应:', JSON.stringify(response, null, 2), '内容:', content);
-      throw new error;
+      this.logger.error('解析失败:', error, '原始响应:', JSON.stringify(response, null, 2));
+      throw error;
     }
   }
 }
