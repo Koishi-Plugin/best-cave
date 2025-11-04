@@ -3,6 +3,7 @@ import { Config, CaveObject, StoredElement } from './index';
 import { FileManager } from './FileManager';
 import * as path from 'path';
 import { requireAdmin, DSU, generateFromLSH } from './Utils';
+import { error } from 'console';
 
 /**
  * @description 定义了数据库 `cave_meta` 表的结构模型。
@@ -300,16 +301,17 @@ export class AIManager {
       'Authorization': `Bearer ${this.config.aiApiKey}`
     };
     const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
-    const content = response?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string' || !content.trim()) throw new Error;
-    try {
-      const jsonRegex = /```json\s*([\s\S]*?)\s*```/i;
-      const match = content.match(jsonRegex);
-      const jsonString = (match && match[1]) ? match[1] : content;
-      return JSON.parse(jsonString);
-    } catch (error) {
-      this.logger.error('解析失败:', error, '原始响应:', JSON.stringify(response, null, 2));
-      throw error;
-    }
+    const content: string = response?.choices?.[0]?.message?.content;
+    if (!content?.trim()) throw error;
+    const candidates: string[] = [];
+    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
+    if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
+    candidates.push(content);
+    const firstBrace = content.indexOf('{');
+    const lastBrace = content.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(content.substring(firstBrace, lastBrace + 1));
+    for (const candidate of [...new Set(candidates)]) try { return JSON.parse(candidate) } catch {}
+    this.logger.error('解析失败:', error, '原始响应:', JSON.stringify(response, null, 2));
+    throw error;
   }
 }
