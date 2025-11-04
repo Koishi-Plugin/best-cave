@@ -182,61 +182,71 @@ export function apply(ctx: Context, config: Config) {
   cave.subcommand('.add [content:text]', '添加回声洞')
     .usage('添加一条回声洞。可直接发送内容，也可回复或引用消息。')
     .action(async ({ session }, content) => {
-      try {
-        let sourceElements;
-        if (session.quote?.elements) {
-          sourceElements = session.quote.elements;
-        } else if (content?.trim()) {
-          sourceElements = h.parse(content);
-        } else {
-          await session.send("请在一分钟内发送你要添加的内容");
-          const reply = await session.prompt(60000);
-          if (!reply) return "等待操作超时";
-          sourceElements = h.parse(reply);
-        }
-        // logger.info(`消息内容: \n${JSON.stringify(sourceElements, null, 2)}`); // 请勿删除此行
-        // logger.info(`完整会话: \n${JSON.stringify(session, null, 2)}`); // 请勿删除此行
-        const newId = await utils.getNextCaveId(ctx, reusableIds);
-        const creationTime = new Date();
-        const { finalElementsForDb, mediaToSave } = await utils.processMessageElements(sourceElements, newId, session, creationTime);
-        // logger.info(`数据库元素: \n${JSON.stringify(finalElementsForDb, null, 2)}`); // 请勿删除此行
-        if (finalElementsForDb.length === 0) return "无可添加内容";
-        const hasMedia = mediaToSave.length > 0;
-        const downloadedMedia: { fileName: string, buffer: Buffer }[] = [];
-        if (hasMedia) {
-          for (const media of mediaToSave) {
-            const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 30000 }));
-            downloadedMedia.push({ fileName: media.fileName, buffer });
+      let sourceElements;
+      if (session.quote?.elements) {
+        sourceElements = session.quote.elements;
+      } else if (content?.trim()) {
+        sourceElements = h.parse(content);
+      } else {
+        await session.send("请在一分钟内发送你要添加的内容");
+        const reply = await session.prompt(60000);
+        if (!reply) return "等待操作超时";
+        sourceElements = h.parse(reply);
+      }
+      // logger.info(`消息内容: \n${JSON.stringify(sourceElements, null, 2)}`); // 请勿删除此行
+      // logger.info(`完整会话: \n${JSON.stringify(session, null, 2)}`); // 请勿删除此行
+      const newId = await utils.getNextCaveId(ctx, reusableIds);
+      const creationTime = new Date();
+      const { finalElementsForDb, mediaToSave } = await utils.processMessageElements(sourceElements, newId, session, creationTime);
+      // logger.info(`数据库元素: \n${JSON.stringify(finalElementsForDb, null, 2)}`); // 请勿删除此行
+      if (finalElementsForDb.length === 0) return "无可添加内容";
+      const userName = (config.enableName ? await profileManager.getNickname(session.userId) : null) || session.username;
+      const needsReview = config.enablePend && session.cid !== config.adminChannel;
+      const finalStatus: CaveObject['status'] = needsReview ? 'pending' : 'active';
+      const newCave = await ctx.database.create('cave', {
+        id: newId,
+        elements: finalElementsForDb,
+        channelId: session.channelId,
+        userId: session.userId,
+        userName,
+        status: finalStatus,
+        time: creationTime,
+      });
+      session.send(needsReview ? `提交成功，序号为（${newCave.id}）` : `添加成功，序号为（${newCave.id}）`);
+      (async () => {
+        try {
+          const hasMedia = mediaToSave.length > 0;
+          const downloadedMedia: { fileName: string, buffer: Buffer }[] = [];
+          if (hasMedia) {
+            for (const media of mediaToSave) {
+              const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 30000 }));
+              downloadedMedia.push({ fileName: media.fileName, buffer });
+            }
           }
-        }
-        let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-        let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-        if (hashManager) {
-          for (const media of downloadedMedia) media.buffer = hashManager.sanitizeImageBuffer(media.buffer);
-          const checkResult = await utils.performSimilarityChecks(ctx, config, hashManager, logger, finalElementsForDb, downloadedMedia);
-          if (checkResult.duplicate) return checkResult.message;
-          textHashesToStore = checkResult.textHashesToStore;
-          imageHashesToStore = checkResult.imageHashesToStore;
-        }
-        if (aiManager) {
-          const duplicateResult = await aiManager.checkForDuplicates(finalElementsForDb, downloadedMedia);
-          if (duplicateResult?.duplicate && duplicateResult.ids?.length > 0) return `内容与回声洞（${duplicateResult.ids.join('|')}）重复`;
-        }
-        const userName = (config.enableName ? await profileManager.getNickname(session.userId) : null) || session.username;
-        const needsReview = config.enablePend && session.cid !== config.adminChannel;
-        let finalStatus: CaveObject['status'] = hasMedia ? 'preload' : (needsReview ? 'pending' : 'active');
-        const newCave = await ctx.database.create('cave', {
-          id: newId,
-          elements: finalElementsForDb,
-          channelId: session.channelId,
-          userId: session.userId,
-          userName,
-          status: finalStatus,
-          time: creationTime,
-        });
-        if (hasMedia) finalStatus = await utils.handleFileUploads(ctx, config, fileManager, logger, newCave, downloadedMedia, reusableIds, needsReview);
-        if (finalStatus !== 'preload') {
-          newCave.status = finalStatus;
+          let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+          let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+          if (hashManager) {
+            for (const media of downloadedMedia) media.buffer = hashManager.sanitizeImageBuffer(media.buffer);
+            const checkResult = await utils.performSimilarityChecks(ctx, config, hashManager, logger, finalElementsForDb, downloadedMedia);
+            if (checkResult.duplicate) {
+              await session.send(`回声洞（${newId}）添加失败：${checkResult.message}`);
+              await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+              await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+              return;
+            }
+            textHashesToStore = checkResult.textHashesToStore;
+            imageHashesToStore = checkResult.imageHashesToStore;
+          }
+          if (aiManager) {
+            const duplicateResult = await aiManager.checkForDuplicates(finalElementsForDb, downloadedMedia);
+            if (duplicateResult?.duplicate && duplicateResult.ids?.length > 0) {
+              await session.send(`回声洞（${newId}）添加失败：内容与回声洞（${duplicateResult.ids.join('|')}）重复`);
+              await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+              await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+              return;
+            }
+          }
+          if (hasMedia) await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
           if (aiManager) {
             const analyses = await aiManager.analyze([newCave], downloadedMedia);
             if (analyses.length > 0) await ctx.database.upsert('cave_meta', analyses);
@@ -246,14 +256,13 @@ export function apply(ctx: Context, config: Config) {
             if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);
           }
           if (finalStatus === 'pending' && reviewManager) reviewManager.sendForPend(newCave);
+        } catch (error) {
+          logger.error(`回声洞（${newId}）处理失败:`, error);
+          await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+          await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+          await session.send(`回声洞（${newId}）处理失败: ${error.message}`);
         }
-        return needsReview
-          ? `提交成功，序号为（${newCave.id}）`
-          : `添加成功，序号为（${newCave.id}）`;
-      } catch (error) {
-        logger.error('添加回声洞失败:', error);
-        return '添加失败，请稍后再试';
-      }
+      })();
     });
 
   cave.subcommand('.view <id:posint>', '查看指定回声洞')

@@ -328,35 +328,6 @@ export async function performSimilarityChecks(ctx: Context, config: Config, hash
 }
 
 /**
- * @description 异步处理文件上传，并在成功后更新回声洞状态。
- * @param ctx - Koishi 上下文。
- * @param config - 插件配置。
- * @param fileManager - FileManager 实例，用于保存文件。
- * @param logger - 日志记录器实例。
- * @param cave - 刚刚在数据库中创建的 `preload` 状态的回声洞对象。
- * @param downloadedMedia - 需要保存的媒体文件及其 Buffer。
- * @param reusableIds - 可复用 ID 的内存缓存。
- * @param session - 触发此操作的用户会话。
- * @returns 成功则返回最终状态 ('pending' or 'active')，失败则返回 'delete'。
- */
-export async function handleFileUploads(
-  ctx: Context, config: Config, fileManager: FileManager, logger: Logger, cave: CaveObject,
-  downloadedMedia: { fileName: string, buffer: Buffer }[], reusableIds: Set<number>, needsReview: boolean
-): Promise<'pending' | 'active'> {
-  try {
-    await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
-    const finalStatus = needsReview ? 'pending' : 'active';
-    await ctx.database.upsert('cave', [{ id: cave.id, status: finalStatus }]);
-    return finalStatus;
-  } catch (fileProcessingError) {
-    logger.error(`回声洞（${cave.id}）文件处理失败:`, fileProcessingError);
-    await ctx.database.upsert('cave', [{ id: cave.id, status: 'delete' }]);
-    cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
-    throw fileProcessingError;
-  }
-}
-
-/**
  * @description 校验会话是否来自指定的管理群组。
  * @param session 当前会话。
  * @param config 插件配置。
@@ -365,4 +336,72 @@ export async function handleFileUploads(
 export function requireAdmin(session: Session, config: Config): string | null {
   if (session.cid !== config.adminChannel) return '此指令仅限在管理群组中使用';
   return null;
+}
+
+/**
+ * @class DSU
+ * @description 一个通用的并查集（Disjoint Set Union）数据结构，用于高效地处理集合的合并与查找。
+ * 非常适合用于将相似或重复的项进行聚类。
+ */
+export class DSU {
+  private parent: Map<number, number> = new Map();
+
+  /**
+   * 查找元素的根节点，并进行路径压缩优化。
+   * @param i - 要查找的元素 ID。
+   * @returns 元素的根节点 ID。
+   */
+  find(i: number): number {
+    if (!this.parent.has(i)) {
+      this.parent.set(i, i);
+      return i;
+    }
+    if (this.parent.get(i) === i) return i;
+    const root = this.find(this.parent.get(i)!);
+    this.parent.set(i, root);
+    return root;
+  }
+
+  /**
+   * 合并两个元素所在的集合。
+   * @param i - 第一个元素。
+   * @param j - 第二个元素。
+   */
+  union(i: number, j: number): void {
+    const rootI = this.find(i);
+    const rootJ = this.find(j);
+    if (rootI !== rootJ) this.parent.set(rootI, rootJ);
+  }
+}
+
+/**
+ * @description 通用的 LSH (局部敏感哈希) 候选对生成器。
+ * @param items 要处理的项目数组。
+ * @param getBucketInfo 一个函数，接收单个项目，并返回其唯一 ID 和一个桶键数组。
+ * @returns 一个 Set，包含所有候选对的字符串键 (e.g., "123-456")。
+ */
+export function generateFromLSH<T>(items: T[], getBucketInfo: (item: T) => { id: number; keys: string[] }): Set<string> {
+  const buckets = new Map<string, number[]>();
+  items.forEach(item => {
+    const { id, keys } = getBucketInfo(item);
+    if (!id || !keys || keys.length === 0) return;
+    keys.forEach(key => {
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key)!.push(id);
+    });
+  });
+
+  const candidatePairs = new Set<string>();
+  for (const ids of buckets.values()) {
+    if (ids.length < 2) continue;
+    const uniqueIds = [...new Set(ids)].sort((a, b) => a - b);
+    if (uniqueIds.length < 2) continue;
+    for (let i = 0; i < uniqueIds.length; i++) {
+      for (let j = i + 1; j < uniqueIds.length; j++) {
+        const pairKey = `${uniqueIds[i]}-${uniqueIds[j]}`;
+        candidatePairs.add(pairKey);
+      }
+    }
+  }
+  return candidatePairs;
 }

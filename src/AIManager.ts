@@ -2,7 +2,7 @@ import { Context, Logger } from 'koishi';
 import { Config, CaveObject, StoredElement } from './index';
 import { FileManager } from './FileManager';
 import * as path from 'path';
-import { requireAdmin } from './Utils';
+import { requireAdmin, DSU, generateFromLSH } from './Utils';
 
 /**
  * @description 定义了数据库 `cave_meta` 表的结构模型。
@@ -99,7 +99,7 @@ export class AIManager {
           if (cavesToAnalyze.length === 0) return '无需分析回声洞';
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
-          const batchSize = 10;
+          const batchSize = 100;
           for (let i = 0; i < cavesToAnalyze.length; i += batchSize) {
             const batch = cavesToAnalyze.slice(i, i + batchSize);
             this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 条回声洞...`);
@@ -124,26 +124,41 @@ export class AIManager {
         try {
           const allMeta = await this.ctx.database.get('cave_meta', {});
           if (allMeta.length < 2) return '无可比较数据';
+          const candidatePairs = generateFromLSH(allMeta, (meta) => ({ id: meta.cave, keys: meta.keywords }));
+          if (candidatePairs.size === 0) return '未发现相似内容';
           const allCaves = new Map((await this.ctx.database.get('cave', { status: 'active' })).map(c => [c.id, c]));
-          const foundPairs = new Set<string>();
-          const checkedPairs = new Set<string>();
-          for (let i = 0; i < allMeta.length; i++) {
-            for (let j = i + 1; j < allMeta.length; j++) {
-              const meta1 = allMeta[i];
-              const meta2 = allMeta[j];
-              const pairKey = [meta1.cave, meta2.cave].sort((a, b) => a - b).join('-');
-              if (checkedPairs.has(pairKey)) continue;
-              const similarity = this.calculateKeywordSimilarity(meta1.keywords, meta2.keywords);
-              if (similarity >= 80) {
-                const cave1 = allCaves.get(meta1.cave);
-                const cave2 = allCaves.get(meta2.cave);
-                if (cave1 && cave2 && await this.isContentDuplicateAI(cave1, cave2)) foundPairs.add(`${cave1.id} & ${cave2.id}`);
-                checkedPairs.add(pairKey);
-              }
-            }
-          }
-          if (foundPairs.size === 0) return '检查完成，未发现高重复性的内容。';
-          return `检查完成，共发现 ${foundPairs.size} 组可能重复的内容:\n${[...foundPairs].join('\n')}`;
+          const duplicatePairs: { id1: number; id2: number }[] = [];
+          const comparisonPromises = Array.from(candidatePairs).map(async (pairKey) => {
+            const [id1, id2] = pairKey.split('-').map(Number);
+            const cave1 = allCaves.get(id1);
+            const cave2 = allCaves.get(id2);
+            if (cave1 && cave2 && await this.isContentDuplicateAI(cave1, cave2)) return { id1, id2 };
+            return null;
+          });
+          const results = await Promise.all(comparisonPromises);
+          duplicatePairs.push(...results.filter(Boolean));
+          if (duplicatePairs.length === 0) return '未发现高重复性的内容';
+          const dsu = new DSU();
+          const allIds = new Set<number>();
+          duplicatePairs.forEach(p => {
+            dsu.union(p.id1, p.id2);
+            allIds.add(p.id1);
+            allIds.add(p.id2);
+          });
+          const clusters = new Map<number, number[]>();
+          allIds.forEach(id => {
+            const root = dsu.find(id);
+            if (!clusters.has(root)) clusters.set(root, []);
+            clusters.get(root)!.push(id);
+          });
+          const validClusters = Array.from(clusters.values()).filter(c => c.length > 1);
+          if (validClusters.length === 0) return '未发现高重复性的内容';
+          let report = `共发现 ${validClusters.length} 组高重复性的内容:`;
+          validClusters.forEach(cluster => {
+            const sortedCluster = cluster.sort((a, b) => a - b);
+            report += `\n- ${sortedCluster.join('|')}`;
+          });
+          return report;
         } catch (error) {
           this.logger.error('检查重复性失败:', error);
           return `检查失败: ${error.message}`;
@@ -284,7 +299,7 @@ export class AIManager {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${this.config.aiApiKey}`
     };
-    const response = await this.http.post(fullUrl, payload, { headers, timeout: 60000 });
+    const response = await this.http.post(fullUrl, payload, { headers, timeout: 180000 });
     const content = response?.choices?.[0]?.message?.content;
     if (typeof content !== 'string' || !content.trim()) throw new Error;
     try {

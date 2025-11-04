@@ -3,7 +3,7 @@ import { Config, CaveObject } from './index';
 import Jimp from 'jimp';
 import { FileManager } from './FileManager';
 import * as crypto from 'crypto';
-import { requireAdmin } from './Utils';
+import { requireAdmin, DSU, generateFromLSH } from './Utils';
 
 /**
  * @description 数据库 `cave_hash` 表的完整对象模型。
@@ -45,7 +45,7 @@ export class HashManager {
   }
 
   /**
-   * @description 注册与哈希功能相关的 `.hash` 和 `.check` 子命令。
+   * @description 注册与哈希功能相关的子命令。
    * @param cave - 主 `cave` 命令实例。
    */
   public registerCommands(cave) {
@@ -122,48 +122,72 @@ export class HashManager {
           const imageThreshold = options.imageThreshold ?? this.config.imageThreshold;
           const allHashes = await this.ctx.database.get('cave_hash', {});
           if (allHashes.length < 2) return '无可比较哈希';
-          const buckets = new Map<string, number[]>();
-          const hashLookup = new Map<number, { text?: string, image?: string }>();
-          for (const hashObj of allHashes) {
-            if (!hashLookup.has(hashObj.cave)) hashLookup.set(hashObj.cave, {});
-            hashLookup.get(hashObj.cave)[hashObj.type] = hashObj.hash;
+          const candidatePairs = generateFromLSH(allHashes, (hashObj) => {
             const binHash = BigInt('0x' + hashObj.hash).toString(2).padStart(64, '0');
+            const keys: string[] = [];
             for (let i = 0; i < 4; i++) {
               const band = binHash.substring(i * 16, (i + 1) * 16);
-              const bucketKey = `${hashObj.type}:${i}:${band}`;
-              if (!buckets.has(bucketKey)) buckets.set(bucketKey, []);
-              buckets.get(bucketKey).push(hashObj.cave);
+              keys.push(`${hashObj.type}:${i}:${band}`);
+            }
+            return { id: hashObj.cave, keys };
+          });
+          const hashLookup = new Map<number, { text?: string, image?: string }>();
+          allHashes.forEach(h => {
+              if (!hashLookup.has(h.cave)) hashLookup.set(h.cave, {});
+              hashLookup.get(h.cave)[h.type] = h.hash;
+          });
+          const textPairs: { id1: number, id2: number, similarity: number }[] = [];
+          const imagePairs: { id1: number, id2: number, similarity: number }[] = [];
+          for (const pairKey of candidatePairs) {
+            const [id1, id2] = pairKey.split('-').map(Number);
+            const cave1Hashes = hashLookup.get(id1);
+            const cave2Hashes = hashLookup.get(id2);
+            if (cave1Hashes?.text && cave2Hashes?.text) {
+              const similarity = this.calculateSimilarity(cave1Hashes.text, cave2Hashes.text);
+              if (similarity >= textThreshold) textPairs.push({ id1, id2, similarity });
+            }
+            if (cave1Hashes?.image && cave2Hashes?.image) {
+              const similarity = this.calculateSimilarity(cave1Hashes.image, cave2Hashes.image);
+              if (similarity >= imageThreshold) imagePairs.push({ id1, id2, similarity });
             }
           }
-          const candidatePairs = new Set<string>();
-          const similarPairs = { text: new Set<string>(), image: new Set<string>() };
-          for (const ids of buckets.values()) {
-            if (ids.length < 2) continue;
-            for (let i = 0; i < ids.length; i++) {
-              for (let j = i + 1; j < ids.length; j++) {
-                const id1 = ids[i];
-                const id2 = ids[j];
-                const pairKey = [id1, id2].sort((a, b) => a - b).join('-');
-                if (candidatePairs.has(pairKey)) continue;
-                candidatePairs.add(pairKey);
-                const cave1Hashes = hashLookup.get(id1);
-                const cave2Hashes = hashLookup.get(id2);
-                if (cave1Hashes?.text && cave2Hashes?.text) {
-                  const similarity = this.calculateSimilarity(cave1Hashes.text, cave2Hashes.text);
-                  if (similarity >= textThreshold) similarPairs.text.add(`${id1} & ${id2} = ${similarity.toFixed(2)}%`);
-                }
-                if (cave1Hashes?.image && cave2Hashes?.image) {
-                  const similarity = this.calculateSimilarity(cave1Hashes.image, cave2Hashes.image);
-                  if (similarity >= imageThreshold) similarPairs.image.add(`${id1} & ${id2} = ${similarity.toFixed(2)}%`);
-                }
-              }
-            }
+          if (textPairs.length === 0 && imagePairs.length === 0) return '未发现高相似度的内容';
+          const generateReportForType = (pairs: { id1: number, id2: number, similarity: number }[]): { reportLines: string[], clusters: number[][] } => {
+            if (pairs.length === 0) return { reportLines: [], clusters: [] };
+            const dsu = new DSU();
+            const allIds = new Set<number>();
+            pairs.forEach(p => { dsu.union(p.id1, p.id2); allIds.add(p.id1); allIds.add(p.id2); });
+            const clusterMap = new Map<number, number[]>();
+            allIds.forEach(id => {
+              const root = dsu.find(id);
+              if (!clusterMap.has(root)) clusterMap.set(root, []);
+              clusterMap.get(root)!.push(id);
+            });
+            const validClusters = Array.from(clusterMap.values()).filter(c => c.length > 1);
+            const reportLines: string[] = [];
+            validClusters.forEach(cluster => {
+              const sortedCluster = cluster.sort((a, b) => a - b);
+              const clusterPairs = pairs
+                  .filter(p => cluster.includes(p.id1) && cluster.includes(p.id2))
+                  .sort((a, b) => b.similarity - a.similarity);
+              const scores = clusterPairs.map(p => `${p.similarity.toFixed(2)}%`).join('/');
+              reportLines.push(`- ${sortedCluster.join('|')} = ${scores}`);
+            });
+            return { reportLines, clusters: validClusters };
+          };
+          const textResult = generateReportForType(textPairs);
+          const imageResult = generateReportForType(imagePairs);
+          const totalClusters = textResult.clusters.length + imageResult.clusters.length;
+          if (totalClusters === 0) return '未发现高相似度的内容';
+          let report = `共发现 ${totalClusters} 组高相似度的内容:`;
+          if (textResult.reportLines.length > 0) {
+            report += `\n[文本相似]`;
+            report += `\n${textResult.reportLines.join('\n')}`;
           }
-          const totalFindings = similarPairs.text.size + similarPairs.image.size;
-          if (totalFindings === 0) return '未发现高相似度的内容';
-          let report = `已发现 ${totalFindings} 组高相似度的内容:`;
-          if (similarPairs.text.size > 0) report += '\n文本内容相似:\n' + [...similarPairs.text].join('\n');
-          if (similarPairs.image.size > 0) report += '\n图片内容相似:\n' + [...similarPairs.image].join('\n');
+          if (imageResult.reportLines.length > 0) {
+            report += `\n[图片相似]`;
+            report += `\n${imageResult.reportLines.join('\n')}`;
+          }
           return report.trim();
         } catch (error) {
           this.logger.error('检查相似度失败:', error);
