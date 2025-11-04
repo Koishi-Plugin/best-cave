@@ -100,7 +100,7 @@ export class AIManager {
           if (cavesToAnalyze.length === 0) return '无需分析回声洞';
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
-          const batchSize = 25;
+          const batchSize = 10;
           for (let i = 0; i < cavesToAnalyze.length; i += batchSize) {
             const batch = cavesToAnalyze.slice(i, i + batchSize);
             this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 条回声洞...`);
