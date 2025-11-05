@@ -3,7 +3,6 @@ import { Config, CaveObject, StoredElement } from './index';
 import { FileManager } from './FileManager';
 import * as path from 'path';
 import { requireAdmin, DSU, generateFromLSH } from './Utils';
-import { error } from 'console';
 
 /**
  * @description 定义了数据库 `cave_meta` 表的结构模型。
@@ -100,17 +99,17 @@ export class AIManager {
           if (cavesToAnalyze.length === 0) return '无需分析回声洞';
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
-          const batchSize = 10;
+          const totalToAnalyze = cavesToAnalyze.length;
+          const progress = { count: 0 };
+          const batchSize = 25;
           for (let i = 0; i < cavesToAnalyze.length; i += batchSize) {
             const batch = cavesToAnalyze.slice(i, i + batchSize);
-            this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 条回声洞...`);
-            const analyses = await this.analyze(batch);
-            if (analyses.length > 0) {
-              await this.ctx.database.upsert('cave_meta', analyses);
-              successCount += analyses.length;
-            }
+            this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 个回声洞...`);
+            successCount += await this.processCaveBatch(batch, totalToAnalyze, progress);
           }
-          return `已分析 ${successCount} 个回声洞`;
+
+          const failedCount = totalToAnalyze - successCount;
+          if (failedCount > 0) return `已分析 ${successCount} 个回声洞（失败 ${failedCount} 个）`;
         } catch (error) {
           this.logger.error('分析回声洞失败:', error);
           return `操作失败: ${error.message}`;
@@ -168,6 +167,39 @@ export class AIManager {
   }
 
   /**
+   * @description 递归处理和分析回声洞批次，失败时按 1/5 拆分以定位问题。
+   * @param {CaveObject[]} caves - 当前要处理的回声洞对象数组。
+   * @param {number} totalCaves - 要分析的回声洞总数。
+   * @param {{ count: number }} progress - 用于跟踪总体进度的计数器对象。
+   * @returns {Promise<number>} 成功分析的回声洞数量。
+   * @private
+   */
+  private async processCaveBatch(caves: CaveObject[], totalCaves: number, progress: { count: number }): Promise<number> {
+    if (caves.length === 0) return 0;
+    this.logger.info(`[${progress.count + 1}/${totalCaves}] 正在分析回声洞（${caves.map(c => c.id).join('|')}）...`);
+    try {
+      const analyses = await this.analyze(caves);
+      if (analyses.length > 0) await this.ctx.database.upsert('cave_meta', analyses);
+      progress.count += caves.length;
+      return analyses.length;
+    } catch (error) {
+      if (caves.length > 1) {
+        const subBatches: CaveObject[][] = [];
+        const subBatchSize = Math.ceil(caves.length / 5);
+        for (let i = 0; i < caves.length; i += subBatchSize) subBatches.push(caves.slice(i, i + subBatchSize));
+        const processingPromises = subBatches.map(subBatch => this.processCaveBatch(subBatch, totalCaves, progress));
+        const results = await Promise.all(processingPromises);
+        return results.reduce((sum, count) => sum + count, 0);
+      } else {
+        const failedCave = caves[0];
+        progress.count++;
+        this.logger.error(`[${progress.count}/${totalCaves}] 分析回声洞（${failedCave.id}）失败:`, error);
+        return 0;
+      }
+    }
+  }
+
+  /**
    * @description 对新提交的内容执行 AI 驱动的查重检查。
    * @param {StoredElement[]} newElements - 新提交的内容元素数组。
    * @param {{ fileName: string; buffer: Buffer }[]} [mediaBuffers] - (可选) 与内容关联的媒体文件缓存。
@@ -220,12 +252,15 @@ export class AIManager {
               };
             } catch (error) {
               this.logger.warn(`读取文件（${el.file}）失败:`, error);
+              return null;
             }
           })
       );
       const images = imageElements.filter(Boolean);
       if (!combinedText.trim() && images.length === 0) return null;
-      const contentForAI: any[] = [{ type: 'text', text: `请分析以下内容：\n\n${combinedText}` }, ...images];
+      const contentForAI: any[] = [];
+      if (combinedText.trim()) contentForAI.push({ type: 'text', text: `请分析以下内容：\n\n${combinedText}` });
+      contentForAI.push(...images);
       const userMessage = { role: 'user', content: contentForAI };
       const response = await this.requestAI<{ keywords: string[]; description: string; rating: number; }>([userMessage], this.ANALYSIS_SYSTEM_PROMPT);
       if (response) return {
@@ -300,18 +335,26 @@ export class AIManager {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${this.config.aiApiKey}`
     };
-    const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
-    const content: string = response?.choices?.[0]?.message?.content;
-    if (!content?.trim()) throw error;
-    const candidates: string[] = [];
-    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
-    if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
-    candidates.push(content);
-    const firstBrace = content.indexOf('{');
-    const lastBrace = content.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(content.substring(firstBrace, lastBrace + 1));
-    for (const candidate of [...new Set(candidates)]) try { return JSON.parse(candidate) } catch {}
-    this.logger.error('解析失败:', error, '原始响应:', JSON.stringify(response, null, 2));
-    throw error;
+    try {
+      const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
+      const content: string = response?.choices?.[0]?.message?.content;
+      if (!content?.trim()) throw new Error;
+      const candidates: string[] = [];
+      const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
+      if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
+      candidates.push(content);
+      const firstBrace = content.indexOf('{');
+      const lastBrace = content.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(content.substring(firstBrace, lastBrace + 1));
+      for (const candidate of [...new Set(candidates)]) {
+        try {
+          return JSON.parse(candidate);
+        } catch (parseError) { }
+      }
+      this.logger.error('解析失败', '原始响应:', JSON.stringify(response, null, 2));
+      throw new Error;
+    } catch (e) {
+      throw e;
+    }
   }
 }
