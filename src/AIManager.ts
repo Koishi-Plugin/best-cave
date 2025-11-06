@@ -100,7 +100,6 @@ export class AIManager {
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
           let failedCount = 0;
-          let consecutiveFailures = 0;
           for (let i = 0; i < cavesToAnalyze.length; i += 25) {
             const batch = cavesToAnalyze.slice(i, i + 25);
             this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 个回声洞...`);
@@ -112,10 +111,8 @@ export class AIManager {
               const cave = batch[j];
               if (result.status === 'fulfilled' && result.value.length > 0) {
                 successfulAnalyses.push(result.value[0]);
-                consecutiveFailures = 0;
               } else {
                 failedCount++;
-                consecutiveFailures++;
                 if (result.status === 'rejected') this.logger.error(`分析回声洞（${cave.id}）失败:`, result.reason);
               }
             }
@@ -123,7 +120,6 @@ export class AIManager {
               await this.ctx.database.upsert('cave_meta', successfulAnalyses);
               successCount += successfulAnalyses.length;
             }
-            if (consecutiveFailures >= 3) break;
           }
           return `已分析 ${successCount} 个回声洞（失败 ${failedCount} 个）`;
         } catch (error) {
@@ -142,8 +138,10 @@ export class AIManager {
           if (allMeta.length < 2) return '无可比较数据';
           const candidatePairs = generateFromLSH(allMeta, (meta) => ({ id: meta.cave, keys: meta.keywords }));
           if (candidatePairs.size === 0) return '未发现相似内容';
-          const allCaves = new Map((await this.ctx.database.get('cave', { status: 'active' })).map(c => [c.id, c]));
-          const duplicatePairs: { id1: number; id2: number }[] = [];
+          const idsToCompare = new Set<number>();
+          candidatePairs.forEach(pairKey => { pairKey.split('-').map(Number).forEach(id => idsToCompare.add(id)) });
+          const caveData = await this.ctx.database.get('cave', { id: { $in: Array.from(idsToCompare) }, status: 'active' });
+          const allCaves = new Map(caveData.map(c => [c.id, c]));
           const comparisonPromises = Array.from(candidatePairs).map(async (pairKey) => {
             const [id1, id2] = pairKey.split('-').map(Number);
             const cave1 = allCaves.get(id1);
@@ -152,7 +150,7 @@ export class AIManager {
             return null;
           });
           const results = await Promise.all(comparisonPromises);
-          duplicatePairs.push(...results.filter(Boolean));
+          const duplicatePairs = results.filter(Boolean);
           if (duplicatePairs.length === 0) return '未发现高重复性的内容';
           const dsu = new DSU();
           const allIds = new Set<number>();
@@ -246,12 +244,14 @@ export class AIManager {
       contentForAI.push(...images);
       const userMessage = { role: 'user', content: contentForAI };
       const response = await this.requestAI<{ keywords: string[]; description: string; rating: number; }>([userMessage], this.ANALYSIS_SYSTEM_PROMPT);
-      if (response) return {
+      if (response) {
+        return {
           cave: cave.id,
           keywords: response.keywords || [],
           description: response.description || '',
           rating: Math.max(0, Math.min(100, response.rating || 0)),
         };
+      }
       return null;
     });
     const results = await Promise.all(analysisPromises);
@@ -263,7 +263,6 @@ export class AIManager {
    * @param {CaveObject} caveA - 第一个回声洞对象。
    * @param {CaveObject} caveB - 第二个回声洞对象。
    * @returns {Promise<boolean>} 如果内容被 AI 判断为重复，则返回 true，否则返回 false。
-   * @throws {Error} 当 AI 请求失败时抛出。
    * @private
    */
   private async isContentDuplicateAI(caveA: CaveObject, caveB: CaveObject): Promise<boolean> {
@@ -318,26 +317,17 @@ export class AIManager {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${this.config.aiApiKey}`
     };
-    try {
-      const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
-      const content: string = response?.choices?.[0]?.message?.content;
-      if (!content?.trim()) throw new Error;
-      const candidates: string[] = [];
-      const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
-      if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
-      candidates.push(content);
-      const firstBrace = content.indexOf('{');
-      const lastBrace = content.lastIndexOf('}');
-      if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(content.substring(firstBrace, lastBrace + 1));
-      for (const candidate of [...new Set(candidates)]) {
-        try {
-          return JSON.parse(candidate);
-        } catch (parseError) { }
-      }
-      this.logger.error('解析失败', '原始响应:', JSON.stringify(response, null, 2));
-      throw new Error;
-    } catch (e) {
-      throw e;
-    }
+    const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
+    const content: string = response?.choices?.[0]?.message?.content;
+    if (!content?.trim()) throw new Error();
+    const candidates: string[] = [];
+    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
+    if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
+    candidates.push(content);
+    const firstBrace = content.indexOf('{');
+    const lastBrace = content.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(content.substring(firstBrace, lastBrace + 1));
+    for (const candidate of [...new Set(candidates)]) try { return JSON.parse(candidate) } catch (parseError) { /* 忽略解析错误 */ }
+    this.logger.error('原始响应:', JSON.stringify(response, null, 2));
   }
 }
