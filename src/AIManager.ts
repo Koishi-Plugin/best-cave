@@ -99,17 +99,33 @@ export class AIManager {
           if (cavesToAnalyze.length === 0) return '无需分析回声洞';
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
-          const totalToAnalyze = cavesToAnalyze.length;
-          const progress = { count: 0 };
-          const batchSize = 25;
-          for (let i = 0; i < cavesToAnalyze.length; i += batchSize) {
-            const batch = cavesToAnalyze.slice(i, i + batchSize);
+          let failedCount = 0;
+          let consecutiveFailures = 0;
+          for (let i = 0; i < cavesToAnalyze.length; i += 25) {
+            const batch = cavesToAnalyze.slice(i, i + 25);
             this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 个回声洞...`);
-            successCount += await this.processCaveBatch(batch, totalToAnalyze, progress);
+            const analysisPromises = batch.map(cave => this.analyze([cave]));
+            const results = await Promise.allSettled(analysisPromises);
+            const successfulAnalyses: CaveMetaObject[] = [];
+            for (let j = 0; j < results.length; j++) {
+              const result = results[j];
+              const cave = batch[j];
+              if (result.status === 'fulfilled' && result.value.length > 0) {
+                successfulAnalyses.push(result.value[0]);
+                consecutiveFailures = 0;
+              } else {
+                failedCount++;
+                consecutiveFailures++;
+                if (result.status === 'rejected') this.logger.error(`分析回声洞（${cave.id}）失败:`, result.reason);
+              }
+            }
+            if (successfulAnalyses.length > 0) {
+              await this.ctx.database.upsert('cave_meta', successfulAnalyses);
+              successCount += successfulAnalyses.length;
+            }
+            if (consecutiveFailures >= 3) break;
           }
-
-          const failedCount = totalToAnalyze - successCount;
-          if (failedCount > 0) return `已分析 ${successCount} 个回声洞（失败 ${failedCount} 个）`;
+          return `已分析 ${successCount} 个回声洞（失败 ${failedCount} 个）`;
         } catch (error) {
           this.logger.error('分析回声洞失败:', error);
           return `操作失败: ${error.message}`;
@@ -164,39 +180,6 @@ export class AIManager {
           return `检查失败: ${error.message}`;
         }
       });
-  }
-
-  /**
-   * @description 递归处理和分析回声洞批次，失败时按 1/5 拆分以定位问题。
-   * @param {CaveObject[]} caves - 当前要处理的回声洞对象数组。
-   * @param {number} totalCaves - 要分析的回声洞总数。
-   * @param {{ count: number }} progress - 用于跟踪总体进度的计数器对象。
-   * @returns {Promise<number>} 成功分析的回声洞数量。
-   * @private
-   */
-  private async processCaveBatch(caves: CaveObject[], totalCaves: number, progress: { count: number }): Promise<number> {
-    if (caves.length === 0) return 0;
-    this.logger.info(`[${progress.count + 1}/${totalCaves}] 正在分析回声洞（${caves.map(c => c.id).join('|')}）...`);
-    try {
-      const analyses = await this.analyze(caves);
-      if (analyses.length > 0) await this.ctx.database.upsert('cave_meta', analyses);
-      progress.count += caves.length;
-      return analyses.length;
-    } catch (error) {
-      if (caves.length > 1) {
-        const subBatches: CaveObject[][] = [];
-        const subBatchSize = Math.ceil(caves.length / 5);
-        for (let i = 0; i < caves.length; i += subBatchSize) subBatches.push(caves.slice(i, i + subBatchSize));
-        const processingPromises = subBatches.map(subBatch => this.processCaveBatch(subBatch, totalCaves, progress));
-        const results = await Promise.all(processingPromises);
-        return results.reduce((sum, count) => sum + count, 0);
-      } else {
-        const failedCave = caves[0];
-        progress.count++;
-        this.logger.error(`[${progress.count}/${totalCaves}] 分析回声洞（${failedCave.id}）失败:`, error);
-        return 0;
-      }
-    }
   }
 
   /**
