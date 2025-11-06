@@ -5,10 +5,10 @@
   "contributors": [
     "Yis_Rime <yis_rime@outlook.com>"
   ],
-  "homepage": "https://github.com/YisRime/koishi-plugin-best-cave",
+  "homepage": "https://github.com//Koishi-Plugin/best-cave",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YisRime/koishi-plugin-best-cave.git"
+    "url": "git+https://github.com//Koishi-Plugin/best-cave.git"
   },
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
