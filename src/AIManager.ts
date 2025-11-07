@@ -219,40 +219,45 @@ export class AIManager {
   public async analyze(caves: CaveObject[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<CaveMetaObject[]> {
     const mediaMap = mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined;
     const analysisPromises = caves.map(async (cave) => {
-      const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content).join('\n');
-      const imageElements = await Promise.all(
-        cave.elements
-          .filter(el => el.type === 'image' && el.file)
-          .map(async (el) => {
-            try {
-              const buffer = mediaMap?.get(el.file) ?? await this.fileManager.readFile(el.file);
-              const mimeType = path.extname(el.file).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
-              return {
-                type: 'image_url',
-                image_url: { url: `data:${mimeType};base64,${buffer.toString('base64')}` },
-              };
-            } catch (error) {
-              this.logger.warn(`读取文件（${el.file}）失败:`, error);
-              return null;
-            }
-          })
-      );
-      const images = imageElements.filter(Boolean);
-      if (!combinedText.trim() && images.length === 0) return null;
-      const contentForAI: any[] = [];
-      if (combinedText.trim()) contentForAI.push({ type: 'text', text: `请分析以下内容：\n\n${combinedText}` });
-      contentForAI.push(...images);
-      const userMessage = { role: 'user', content: contentForAI };
-      const response = await this.requestAI<{ keywords: string[]; description: string; rating: number; }>([userMessage], this.ANALYSIS_SYSTEM_PROMPT);
-      if (response) {
-        return {
-          cave: cave.id,
-          keywords: response.keywords || [],
-          description: response.description || '',
-          rating: Math.max(0, Math.min(100, response.rating || 0)),
-        };
+      try {
+        const combinedText = cave.elements.filter(el => el.type === 'text' && el.content).map(el => el.content).join('\n');
+        const imageElements = await Promise.all(
+          cave.elements
+            .filter(el => el.type === 'image' && el.file)
+            .map(async (el) => {
+              try {
+                const buffer = mediaMap?.get(el.file) ?? await this.fileManager.readFile(el.file);
+                const mimeType = path.extname(el.file).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
+                return {
+                  type: 'image_url',
+                  image_url: { url: `data:${mimeType};base64,${buffer.toString('base64')}` },
+                };
+              } catch (error) {
+                this.logger.warn(`读取文件（${el.file}）失败:`, error);
+                return null;
+              }
+            })
+        );
+        const images = imageElements.filter(Boolean);
+        if (!combinedText.trim() && images.length === 0) return null;
+        const contentForAI: any[] = [];
+        if (combinedText.trim()) contentForAI.push({ type: 'text', text: `请分析以下内容：\n\n${combinedText}` });
+        contentForAI.push(...images);
+        const userMessage = { role: 'user', content: contentForAI };
+        const response = await this.requestAI<{ keywords: string[]; description: string; rating: number; }>([userMessage], this.ANALYSIS_SYSTEM_PROMPT);
+        if (response) {
+          return {
+            cave: cave.id,
+            keywords: response.keywords || [],
+            description: response.description || '',
+            rating: Math.max(0, Math.min(100, response.rating || 0)),
+          };
+        }
+        return null;
+      } catch (error) {
+        this.logger.error(`分析回声洞（${cave.id}）失败:`, error);
+        return null;
       }
-      return null;
     });
     const results = await Promise.all(analysisPromises);
     return results.filter((result): result is CaveMetaObject => !!result);
