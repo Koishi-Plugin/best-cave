@@ -244,7 +244,7 @@ export class AIManager {
         if (combinedText.trim()) contentForAI.push({ type: 'text', text: `请分析以下内容：\n\n${combinedText}` });
         contentForAI.push(...images);
         const userMessage = { role: 'user', content: contentForAI };
-        const response = await this.requestAI<{ keywords: string[]; description: string; rating: number; }>([userMessage], this.ANALYSIS_SYSTEM_PROMPT);
+        const response = await this.requestAI<{ keywords: string[]; description: string; rating: number; }>(this.config.analysisModel, [userMessage], this.ANALYSIS_SYSTEM_PROMPT);
         if (response) {
           return {
             cave: cave.id,
@@ -278,7 +278,7 @@ export class AIManager {
           content_b: { id: caveB.id, text: formatContent(caveB.elements) },
       };
       const userMessage = { role: 'user', content: JSON.stringify(userMessageContent) };
-      const response = await this.requestAI<{ duplicate?: boolean }>([userMessage], this.DUPLICATE_CHECK_SYSTEM_PROMPT);
+      const response = await this.requestAI<{ duplicate?: boolean }>(this.config.duplicateCheckModel, [userMessage], this.DUPLICATE_CHECK_SYSTEM_PROMPT);
       return response?.duplicate || false;
     } catch (error) {
       this.logger.error(`比较回声洞（${caveA.id}）与（${caveB.id}）失败:`, error);
@@ -306,25 +306,39 @@ export class AIManager {
   /**
    * @description 封装了向 OpenAI 兼容的 API 发送请求的底层逻辑。
    * @template T - 期望从 AI 响应的 JSON 中解析出的数据类型。
+   * @param {string} modelIdentifier - 模型的完整标识符，格式为 `端点名称/模型名称`。
    * @param {any[]} messages - 发送给 AI 的消息数组，通常包含用户消息。
    * @param {string} systemPrompt - 指导 AI 行为的系统级指令。
    * @returns {Promise<T>} 一个 Promise，解析为从 AI 响应中提取并解析的 JSON 对象。
    * @throws {Error} 当网络请求失败、AI 未返回有效内容或 JSON 解析失败时抛出。
    * @private
    */
-  private async requestAI<T>(messages: any[], systemPrompt: string): Promise<T> {
+  private async requestAI<T>(modelIdentifier: string, messages: any[], systemPrompt: string): Promise<T> {
+    if (!modelIdentifier || !modelIdentifier.includes('/')) {
+      throw new Error(`无效的模型标识符: ${modelIdentifier}。格式应为 '端点名称/模型名称'`);
+    }
+    const [name, modelName] = modelIdentifier.split('/');
+    if (!name || !modelName) {
+      throw new Error(`无效的模型标识符: ${modelIdentifier}。格式应为 '端点名称/模型名称'`);
+    }
+
+    const endpointConfig = this.config.endpoints?.find(e => e.name === name);
+    if (!endpointConfig) {
+      throw new Error(`未在配置中找到名为 '${name}' 的端点`);
+    }
+
     const payload = {
-      model: this.config.aiModel,
+      model: modelName,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
     };
-    const fullUrl = `${this.config.aiEndpoint.replace(/\/$/, '')}/chat/completions`;
+    const fullUrl = `${endpointConfig.url.replace(/\/$/, '')}/chat/completions`;
     const headers = {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${this.config.aiApiKey}`
+      'Authorization': `Bearer ${endpointConfig.key}`
     };
     const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
     const content: string = response?.choices?.[0]?.message?.content;
-    if (!content?.trim()) throw new Error();
+    if (!content?.trim()) throw new Error('AI 响应内容为空');
     const candidates: string[] = [];
     const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
     if (jsonBlockMatch && jsonBlockMatch[1]) candidates.push(jsonBlockMatch[1]);
@@ -332,7 +346,10 @@ export class AIManager {
     const firstBrace = content.indexOf('{');
     const lastBrace = content.lastIndexOf('}');
     if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(content.substring(firstBrace, lastBrace + 1));
-    for (const candidate of [...new Set(candidates)]) try { return JSON.parse(candidate) } catch (parseError) { /* 忽略解析错误 */ }
+    for (const candidate of [...new Set(candidates)]) {
+      try { return JSON.parse(candidate) } catch (parseError) { /* 忽略解析错误 */ }
+    }
     this.logger.error('原始响应:', JSON.stringify(response, null, 2));
+    throw new Error('无法从 AI 响应中解析出有效的 JSON');
   }
 }

@@ -82,9 +82,13 @@ export interface Config {
   bucket?: string;
   publicUrl?: string;
   enableAI: boolean;
-  aiEndpoint?: string;
-  aiApiKey?: string;
-  aiModel?: string;
+  endpoints?: {
+    name: string;
+    url: string;
+    key: string;
+  }[];
+  analysisModel?: string;
+  duplicateCheckModel?: string;
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -103,9 +107,13 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description('复核配置'),
   Schema.object({
     enableAI: Schema.boolean().default(false).description("启用 AI"),
-    aiEndpoint: Schema.string().description('端点 (Endpoint)').role('link').default('https://api.siliconflow.cn/v1'),
-    aiApiKey: Schema.string().description('密钥 (Key)').role('secret'),
-    aiModel: Schema.string().description('模型 (Model)').default('THUDM/GLM-4.1V-9B-Thinking'),
+    endpoints: Schema.array(Schema.object({
+      name: Schema.string().description('名称').required(),
+      url: Schema.string().description('端点 (Endpoint)').role('link').required(),
+      key: Schema.string().description('密钥 (API Key)').role('secret').required(),
+    })).description('端点列表'),
+    analysisModel: Schema.string().description('分析模型'),
+    duplicateCheckModel: Schema.string().description('查重模型'),
   }).description('模型配置'),
   Schema.object({
     localPath: Schema.string().description('文件映射路径'),
