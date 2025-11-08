@@ -43,7 +43,7 @@ export interface StoredElement {
 }
 
 /**
- * @description 数据库 `cave` 表的完整对象模型。
+ * @description 数据库 \`cave\` 表的完整对象模型。
  */
 export interface CaveObject {
   id: number;
@@ -83,12 +83,10 @@ export interface Config {
   publicUrl?: string;
   enableAI: boolean;
   endpoints?: {
-    name: string;
     url: string;
     key: string;
+    model: string;
   }[];
-  analysisModel?: string;
-  duplicateCheckModel?: string;
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -108,12 +106,10 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     enableAI: Schema.boolean().default(false).description("启用 AI"),
     endpoints: Schema.array(Schema.object({
-      name: Schema.string().description('名称').required(),
       url: Schema.string().description('端点 (Endpoint)').role('link').required(),
       key: Schema.string().description('密钥 (API Key)').role('secret').required(),
-    })).description('端点列表'),
-    analysisModel: Schema.string().description('分析模型'),
-    duplicateCheckModel: Schema.string().description('查重模型'),
+      model: Schema.string().description('模型 (Model)').required(),
+    })).description('端点列表').role('table'),
   }).description('模型配置'),
   Schema.object({
     localPath: Schema.string().description('文件映射路径'),
@@ -246,9 +242,9 @@ export function apply(ctx: Context, config: Config) {
             imageHashesToStore = checkResult.imageHashesToStore;
           }
           if (aiManager) {
-            const duplicateResult = await aiManager.checkForDuplicates(finalElementsForDb, downloadedMedia);
-            if (duplicateResult?.duplicate && duplicateResult.ids?.length > 0) {
-              await session.send(`回声洞（${newId}）添加失败：内容与回声洞（${duplicateResult.ids.join('|')}）重复`);
+            const duplicateIds = await aiManager.checkForDuplicates(finalElementsForDb, downloadedMedia);
+            if (duplicateIds?.length > 0) {
+              await session.send(`回声洞（${newId}）添加失败：内容与回声洞（${duplicateIds.join('|')}）重复`);
               await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
               await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
               return;
