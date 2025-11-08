@@ -29,37 +29,15 @@ export class AIManager {
   private endpointIndex = 0;
 
   /**
-   * @description AI 分析系统提示词，使用 'type' 作为主分类字段。
+   * @description 用于分析的 AI 系统提示词。
    */
   private readonly ANALYSIS_SYSTEM_PROMPT = `你需要分析给定的内容，并按照以下规则进行评分、分类和提取内容中的关键词。
-你的回复必须且只能是一个JSON对象，禁止含有任何其他内容，例如{"rating": 88,"type": "Game","keywords": ["Minecraft", "Nether"]}。
-1."rating" (整数, 0-100): 对内容进行严格且有区分度的评分，以下为评分标准:
-  - 基础分: 50
-  +10至+20: 高原创性、创意或艺术性。
-  +10至+20: 非常搞笑、幽默或有很强的笑点。
-  +10至+20: 引人深思、感人或有强烈的共鸣。
-  +5至+15: 玩梗巧妙或二创质量高，能识别出具体梗/文化背景。
-  -10至-20: 内容质量低下(如图片模糊、有压缩痕迹、文字错别字)。
-  -10至-20: 内容意义不明或非常无聊。
-  -5至-15: 简单或低创意的烂梗、过时流行语。
-  -20至-30: 几乎没有信息量的内容。
-2."type" (字符串): 对内容进行严格且标准的分类，以下为分类标准:
-  - Game: 与电子游戏直接相关或源自于电子游戏的内容。
-  - ACG: 与动漫、漫画及广义二次元文化紧密相关的内容。
-  - Internet: 源于互联网的通用流行文化、迷因(Meme)或社群现象。
-  - Reality: 取材于现实世界的日常经验和场景的内容。
-  - Creative: 具有独特的原创性、艺术性或巧妙构思的内容。
-  - Other: 不适合归入以上任何一类的无关内容或小众内容。
-3."keywords" (字符串数组): 从内容中提取全面且细分的关键词，以下为提取准则：
-  - 直接提取: 优先从文字内容中直接提取核心词汇，而不是进行归纳或总结。提取图片中可辨识的对象、场景或文字。
-  - 简洁规范: 关键词必须简短且为规范化、普遍使用的词语。例如，使用“明日方舟”而非“粥”，使用“梗”而非“梗图”。
-  - 全面细分: 提取多个不同维度的关键词，包括但不限于：人物/对象、场景/地点、事件/行为、特定梗/文化元素。
-  - 避免宽泛: 确保关键词具体且相关，避免使用过于宽泛或模糊的术语，避免近似关键词，所有词应完整定义内容。`;
+你的回复必须且只能是一个JSON对象，禁止含有任何其他内容，例如{"rating": 88,"type": "Game","keywords": ["Minecraft", "Nether"]}。`;
 
   /**
    * @description 用于查重的 AI 系统提示词。
    */
-  private readonly DUPLICATE_SYSTEM_PROMPT = `你需要比较给定的“新内容”(content_new)与“候选内容”(candidate_contents)，识别内容语义或核心思想重复的候选内容。
+  private readonly DUPLICATE_SYSTEM_PROMPT = `你需要比较给定的“新内容”与“候选内容”，识别内容语义或核心思想重复的候选内容。
 你的回复必须且只能是一个JSON数组，禁止含有任何其他内容，只包含重复项ID，例如[1, 2]，若无重复，则返回[]。`;
 
   /**
@@ -229,7 +207,7 @@ export class AIManager {
         const contentForAI = await this.prepareContent(cave, mediaBuffers ? new Map(mediaBuffers.map(m => [m.fileName, m.buffer])) : undefined);
         if (!contentForAI) return null;
         const userMessage = { role: 'user', content: contentForAI };
-        const response = await this.requestAI<{ rating: number; type: string; keywords: string[]; }>([userMessage], this.ANALYSIS_SYSTEM_PROMPT);
+        const response = await this.requestAI<{ rating: number; type: string; keywords: string[]; }>([userMessage], `${this.ANALYSIS_SYSTEM_PROMPT}\n${this.config.systemPrompt}`);
         if (response) {
           return {
             cave: cave.id, rating: Math.max(0, Math.min(100, response.rating || 0)),
@@ -261,7 +239,7 @@ export class AIManager {
           try {
             const buffer = mediaMap?.get(el.file!) ?? await this.fileManager.readFile(el.file!);
             const mimeType = path.extname(el.file!).toLowerCase() === '.png' ? 'image/png' : 'image/jpeg';
-            return { type: 'image_url', image: { url: `data:${mimeType};base64,${buffer.toString('base64')}` } };
+            return { type: 'image_url', image_url: { url: `data:${mimeType};base64,${buffer.toString('base64')}` } };
           } catch (error) {
             this.logger.warn(`读取文件（${el.file}）失败:`, error);
             return null;
@@ -285,10 +263,9 @@ export class AIManager {
   private async IsDuplicate(mainCave: CaveObject, candidateCaves: CaveObject[]): Promise<number[]> {
     try {
       const formatContent = (elements: StoredElement[]) => elements.filter(el => el.type === 'text' && el.content).map(el => el.content as string).join(' ');
-      const userMessageContent = {
-          content_new: { text: formatContent(mainCave.elements) },
-          candidate_contents: candidateCaves.map(cave => ({ id: cave.id, text: formatContent(cave.elements) })),
-      };
+      const newContentText = formatContent(mainCave.elements);
+      const candidatesText = candidateCaves.map(cave => `{"id": ${cave.id}, "text": "${formatContent(cave.elements).replace(/"/g, '\\"')}"}`).join('\n');
+      const userMessageContent = `新内容:\n${newContentText}\n候选内容:\n${candidatesText}`;
       const userMessage = { role: 'user', content: JSON.stringify(userMessageContent) };
       const response = await this.requestAI<number[]>([userMessage], this.DUPLICATE_SYSTEM_PROMPT);
       return response || [];

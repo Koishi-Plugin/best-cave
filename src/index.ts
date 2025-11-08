@@ -22,6 +22,31 @@ export const usage = `
   <p>🐛 遇到问题？请通过 <strong>Issues</strong> 提交反馈，或加入 QQ 群 <a href="https://qm.qq.com/q/PdLMx9Jowq" style="color:#e0574a;text-decoration:none;"><strong>855571375</strong></a> 进行交流</p>
 </div>
 `
+
+const DEFAULT_PROMPT =
+`1."rating" (整数, 0-100): 对内容进行严格且有区分度的评分，以下为评分标准:
+  - 基础分: 50
+  +10至+20: 高原创性、创意或艺术性。
+  +10至+20: 非常搞笑、幽默或有很强的笑点。
+  +10至+20: 引人深思、感人或有强烈的共鸣。
+  +5至+15: 玩梗巧妙或二创质量高，能识别出具体梗/文化背景。
+  -10至-20: 内容质量低下(如图片模糊、有压缩痕迹、文字错别字)。
+  -10至-20: 内容意义不明或非常无聊。
+  -5至-15: 简单或低创意的烂梗、过时流行语。
+  -20至-30: 几乎没有信息量的内容。
+2."type" (字符串): 对内容进行严格且标准的分类，以下为分类标准:
+  - Game: 与电子游戏直接相关或源自于电子游戏的内容。
+  - ACG: 与动漫、漫画及广义二次元文化紧密相关的内容。
+  - Internet: 源于互联网的通用流行文化、迷因(Meme)或社群现象。
+  - Reality: 取材于现实世界的日常经验和场景的内容。
+  - Creative: 具有独特的原创性、艺术性或巧妙构思的内容。
+  - Other: 不适合归入以上任何一类的无关内容或小众内容。
+3."keywords" (字符串数组): 从内容中提取全面且细分的关键词，以下为提取准则：
+  - 直接提取: 优先从文字内容中直接提取核心词汇，而不是进行归纳或总结。提取图片中可辨识的对象、场景或文字。
+  - 简洁规范: 关键词必须简短且为规范化、普遍使用的词语。例如，使用“明日方舟”而非“粥”，使用“梗”而非“梗图”。
+  - 全面细分: 提取多个不同维度的关键词，包括但不限于：人物/对象、场景/地点、事件/行为、特定梗/文化元素。
+  - 避免宽泛: 确保关键词具体且相关，避免使用过于宽泛或模糊的术语，避免近似关键词，所有词应完整定义内容。`;
+
 const logger = new Logger('best-cave');
 
 /**
@@ -87,6 +112,9 @@ export interface Config {
     key: string;
     model: string;
   }[];
+  enableApprove: boolean;
+  approveThreshold: number;
+  systemPrompt: string;
 }
 
 export const Config: Schema<Config> = Schema.intersect([
@@ -105,11 +133,14 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description('复核配置'),
   Schema.object({
     enableAI: Schema.boolean().default(false).description("启用 AI"),
+    enableApprove: Schema.boolean().default(false).description("启用自动审核"),
+    approveThreshold: Schema.number().min(0).max(100).step(1).default(80).description('评分阈值'),
     endpoints: Schema.array(Schema.object({
       url: Schema.string().description('端点 (Endpoint)').role('link').required(),
-      key: Schema.string().description('密钥 (API Key)').role('secret').required(),
+      key: Schema.string().description('密钥 (API Key)').role('secret'),
       model: Schema.string().description('模型 (Model)').required(),
     })).description('端点列表').role('table'),
+    systemPrompt: Schema.string().role('textarea').default(DEFAULT_PROMPT).description('系统提示词'),
   }).description('模型配置'),
   Schema.object({
     localPath: Schema.string().description('文件映射路径'),
@@ -251,15 +282,23 @@ export function apply(ctx: Context, config: Config) {
             }
           }
           if (hasMedia) await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
+          let analysisResult: CaveMetaObject | undefined;
           if (aiManager) {
             const analyses = await aiManager.analyze([newCave], downloadedMedia);
-            if (analyses.length > 0) await ctx.database.upsert('cave_meta', analyses);
+            if (analyses.length > 0) {
+              analysisResult = analyses[0];
+              await ctx.database.upsert('cave_meta', analyses);
+            }
           }
           if (hashManager) {
             const allHashesToInsert = [...textHashesToStore, ...imageHashesToStore].map(h => ({ ...h, cave: newCave.id }));
             if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);
           }
-          if (finalStatus === 'pending' && reviewManager) reviewManager.sendForPend(newCave);
+          if (finalStatus === 'pending' && reviewManager) {
+            if (analysisResult && config.enableApprove && analysisResult.rating >= config.approveThreshold) {
+              await ctx.database.upsert('cave', [{ id: newCave.id, status: 'active' }]);
+            } else reviewManager.sendForPend(newCave);
+          }
         } catch (error) {
           logger.error(`回声洞（${newId}）处理失败:`, error);
           await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
