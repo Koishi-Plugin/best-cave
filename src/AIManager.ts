@@ -27,6 +27,8 @@ declare module 'koishi' {
 export class AIManager {
   private http;
   private endpointIndex = 0;
+  private failureCount = 0;
+  private retryTime = 0;
 
   /**
    * @description 用于分析的 AI 系统提示词。
@@ -191,7 +193,7 @@ export class AIManager {
       return await this.IsDuplicate(dummyCave, potentialDuplicates);
     } catch (error) {
       this.logger.error('查重回声洞出错:', error);
-      return [];
+      throw error;
     }
   }
 
@@ -217,7 +219,7 @@ export class AIManager {
         return null;
       } catch (error) {
         this.logger.error(`分析回声洞（${cave.id}）失败:`, error);
-        return null;
+        throw error;
       }
     });
     const results = await Promise.all(analysisPromises);
@@ -271,7 +273,7 @@ export class AIManager {
       return response || [];
     } catch (error) {
       this.logger.error(`比较回声洞（${mainCave.id}）失败:`, error);
-      return [];
+      throw error;
     }
   }
 
@@ -296,21 +298,37 @@ export class AIManager {
    * @param {any[]} messages - 发送给 AI 的消息数组。
    * @param {string} systemPrompt - 系统提示词。
    * @returns {Promise<T>} - 一个 Promise，解析为从 AI 响应中解析出的 JSON 对象。
-   * @throws {Error} - 如果 AI 响应为空或无法解析为 JSON，则抛出错误。
+   * @throws {Error} - 如果 AI 服务持续失败，则抛出错误。
    */
   private async requestAI<T>(messages: any[], systemPrompt: string): Promise<T> {
-    const endpointConfig = this.config.endpoints[this.endpointIndex];
-    this.endpointIndex = (this.endpointIndex + 1) % this.config.endpoints.length;
-    const payload = { model: endpointConfig.model, messages: [{ role: 'system', content: systemPrompt }, ...messages] };
-    const fullUrl = `${endpointConfig.url.replace(/\/$/, '')}/chat/completions`;
-    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpointConfig.key}` };
-    const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
-    const content: string = response?.choices?.[0]?.message?.content;
-    if (!content?.trim()) throw new Error('响应为空');
-    const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
-    if (jsonBlockMatch && jsonBlockMatch[1]) try { return JSON.parse(jsonBlockMatch[1]) } catch (e) { /* fallback */ }
-    try { return JSON.parse(content) } catch (e) { /* failed */ }
-    this.logger.error('原始响应:', JSON.stringify(response, null, 2));
-    throw new Error;
+    const now = Date.now();
+    if (now < this.retryTime) {
+      const waitTime = this.retryTime - now;
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    try {
+      const endpointConfig = this.config.endpoints[this.endpointIndex];
+      this.endpointIndex = (this.endpointIndex + 1) % this.config.endpoints.length;
+      const payload = { model: endpointConfig.model, messages: [{ role: 'system', content: systemPrompt }, ...messages] };
+      const fullUrl = `${endpointConfig.url.replace(/\/$/, '')}/chat/completions`;
+      const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpointConfig.key}` };
+      const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
+      const content: string = response?.choices?.[0]?.message?.content;
+      if (!content?.trim()) throw new Error;
+      try {
+        const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
+        const jsonString = jsonBlockMatch ? jsonBlockMatch[1] : content;
+        this.failureCount = 0;
+        return JSON.parse(jsonString);
+      } catch (e) {
+        this.logger.error('原始响应:', JSON.stringify(response, null, 2));
+        throw new Error;
+      }
+    } catch (error) {
+      this.failureCount++;
+      this.logger.warn(`请求失败: ${error.message}`);
+      if (this.failureCount >= 3) this.retryTime = Date.now() + 60000;
+      throw error;
+    }
   }
 }
