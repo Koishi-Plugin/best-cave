@@ -315,18 +315,30 @@ export class AIManager {
       const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
       const content: string = response?.choices?.[0]?.message?.content;
       if (!content?.trim()) throw new Error;
-      try {
-        const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
-        const jsonString = jsonBlockMatch ? jsonBlockMatch[1] : content;
-        this.failureCount = 0;
-        return JSON.parse(jsonString);
-      } catch (e) {
-        this.logger.error('原始响应:', JSON.stringify(response, null, 2));
-        throw new Error;
+      const potentialStrings = new Set<string>();
+      const jsonBlockMatch = content.match(/```json\s*([\s\S]*?)\s*```/i);
+      if (jsonBlockMatch?.[1]) potentialStrings.add(jsonBlockMatch[1]);
+      const firstBrace = content.indexOf('{');
+      const lastBrace = content.lastIndexOf('}');
+      const firstBracket = content.indexOf('[');
+      const lastBracket = content.lastIndexOf(']');
+      if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+        if (lastBrace > firstBrace) potentialStrings.add(content.substring(firstBrace, lastBrace + 1));
+      } else if (firstBracket !== -1) {
+        if (lastBracket > firstBracket) potentialStrings.add(content.substring(firstBracket, lastBracket + 1));
       }
+      potentialStrings.add(content);
+      for (const jsonString of potentialStrings) {
+        try {
+          const result = JSON.parse(jsonString);
+          this.failureCount = 0;
+          return result;
+        } catch (e) { /* Ignore */ }
+      }
+      this.logger.error('原始响应:', JSON.stringify(response, null, 2));
+      throw new Error;
     } catch (error) {
       this.failureCount++;
-      this.logger.warn(`请求失败: ${error.message}`);
       if (this.failureCount >= 3) this.retryTime = Date.now() + 60000;
       throw error;
     }
