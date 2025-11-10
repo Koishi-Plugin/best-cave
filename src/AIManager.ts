@@ -169,14 +169,12 @@ export class AIManager {
 
   /**
    * @description 检查新内容是否与数据库中已存在的回声洞重复。
-   * @param {StoredElement[]} newElements - 待检查的新内容的元素数组。
-   * @param {{ fileName: string; buffer: Buffer }[]} [mediaBuffers] - 可选的媒体文件缓存，用于加速处理。
-   * @returns {Promise<number[]>} - 一个 Promise，解析为重复的回声洞 ID 数组。如果不重复，则为空数组。
+   * @param {CaveMetaObject} newAnalysis - 新内容经过 AI 分析后的元数据。
+   * @param {CaveObject} newCave - 待检查的新回声洞的完整对象。
+   * @returns {Promise<number[]>} - 一个 Promise，解析为重复的回声洞 ID 数组。如果不重复或检查失败，则为空数组。
    */
-  public async checkForDuplicates(newElements: StoredElement[], mediaBuffers?: { fileName: string; buffer: Buffer }[]): Promise<number[]> {
+  public async checkForDuplicates(newAnalysis: CaveMetaObject, newCave: CaveObject): Promise<number[]> {
     try {
-      const dummyCave: CaveObject = { id: 0, elements: newElements, channelId: '', userId: '', userName: '', status: 'preload', time: new Date() };
-      const [newAnalysis] = await this.analyze([dummyCave], mediaBuffers);
       if (!newAnalysis || !newAnalysis.type) return [];
       const allNewTags = [newAnalysis.type, ...(newAnalysis.keywords || [])];
       if (allNewTags.length === 1 && !allNewTags[0]) return [];
@@ -190,10 +188,10 @@ export class AIManager {
       if (similarCaveIds.length === 0) return [];
       const potentialDuplicates = await this.ctx.database.get('cave', { id: { $in: similarCaveIds } });
       if (potentialDuplicates.length === 0) return [];
-      return await this.IsDuplicate(dummyCave, potentialDuplicates);
+      return await this.IsDuplicate(newCave, potentialDuplicates);
     } catch (error) {
       this.logger.error('查重回声洞出错:', error);
-      throw error;
+      return [];
     }
   }
 
@@ -219,7 +217,7 @@ export class AIManager {
         return null;
       } catch (error) {
         this.logger.error(`分析回声洞（${cave.id}）失败:`, error);
-        throw error;
+        return null;
       }
     });
     const results = await Promise.all(analysisPromises);
@@ -260,7 +258,7 @@ export class AIManager {
    * @description 使用 AI 批量判断一个主要回声洞是否与一组候选回声洞中的任何一个重复。
    * @param {CaveObject} mainCave - 主要的回声洞。
    * @param {CaveObject[]} candidateCaves - 用于比较的候选回声洞数组。
-   * @returns {Promise<number[]>} - 一个 Promise，解析为重复的回声洞 ID 数组。如果不重复，则为空数组。
+   * @returns {Promise<number[]>} - 一个 Promise，解析为重复的回声洞 ID 数组。如果不重复或检查失败，则为空数组。
    */
   private async IsDuplicate(mainCave: CaveObject, candidateCaves: CaveObject[]): Promise<number[]> {
     try {
@@ -273,7 +271,7 @@ export class AIManager {
       return response || [];
     } catch (error) {
       this.logger.error(`比较回声洞（${mainCave.id}）失败:`, error);
-      throw error;
+      return [];
     }
   }
 

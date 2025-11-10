@@ -3,6 +3,8 @@ import * as path from 'path';
 import { CaveObject, Config, StoredElement, ForwardNode } from './index';
 import { FileManager } from './FileManager';
 import { HashManager, CaveHashObject } from './HashManager';
+import { AIManager, CaveMetaObject } from './AIManager';
+import { PendManager } from './PendManager';
 
 const mimeTypeMap = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg', '.webp': 'image/webp' };
 
@@ -404,4 +406,92 @@ export function generateFromLSH<T>(items: T[], getBucketInfo: (item: T) => { id:
     }
   }
   return candidatePairs;
+}
+
+/**
+ * @description 处理新回声洞创建后的后续逻辑，包括媒体下载、查重、AI分析、哈希存储和状态更新。
+ * @param ctx Koishi 上下文。
+ * @param config 插件配置。
+ * @param fileManager 文件管理器实例。
+ * @param logger 日志记录器实例。
+ * @param reusableIds 可复用 ID 的内存缓存。
+ * @param newCave 已初步创建（status: 'preload'）的回声洞对象。
+ * @param mediaToSave 待保存的媒体文件列表。
+ * @param session 触发操作的会话。
+ * @param hashManager 哈希管理器实例（如果启用）。
+ * @param aiManager AI管理器实例（如果启用）。
+ * @param reviewManager 审核管理器实例（如果启用）。
+ */
+export async function processNewCave(ctx: Context, config: Config, fileManager: FileManager, logger: Logger, reusableIds: Set<number>, newCave: CaveObject, session: Session,
+  mediaToSave: { sourceUrl: string, fileName: string }[], hashManager: HashManager | null, aiManager: AIManager | null, reviewManager: PendManager | null,): Promise<void> {
+  const newId = newCave.id;
+  try {
+    let downloadedMedia: { fileName: string, buffer: Buffer }[] = [];
+    if (mediaToSave.length > 0) {
+      const downloadPromises = mediaToSave.map(async (media) => {
+        const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 60000 }));
+        return { fileName: media.fileName, buffer };
+      });
+      downloadedMedia = await Promise.all(downloadPromises);
+    }
+    let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+    let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
+    if (config.enableSimilarity && hashManager) {
+      for (const media of downloadedMedia) if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) media.buffer = hashManager.sanitizeImageBuffer(media.buffer);
+      const checkResult = await performSimilarityChecks(ctx, config, hashManager, logger, newCave.elements, downloadedMedia);
+      if (checkResult.duplicate) {
+        await session.send(`回声洞（${newId}）添加失败：${checkResult.message}`);
+        await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+        await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+        return;
+      }
+      textHashesToStore = checkResult.textHashesToStore || [];
+      imageHashesToStore = checkResult.imageHashesToStore || [];
+    }
+    if (downloadedMedia.length > 0) await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
+    let analysisResult: CaveMetaObject | undefined;
+    if (config.enableAI && aiManager) {
+      const analyses = await aiManager.analyze([newCave], downloadedMedia);
+      if (analyses.length > 0) {
+        analysisResult = analyses[0];
+        await ctx.database.upsert('cave_meta', analyses);
+        const duplicateIds = await aiManager.checkForDuplicates(analysisResult, newCave);
+        if (duplicateIds?.length > 0) {
+          await session.send(`回声洞（${newId}）添加失败：内容与回声洞（${duplicateIds.join('|')}）重复`);
+          await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+          await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+          return;
+        }
+      }
+    }
+    if (config.enableSimilarity && hashManager) {
+      const allHashesToInsert = [...textHashesToStore, ...imageHashesToStore].map(h => ({ ...h, cave: newCave.id }));
+      if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);
+    }
+    let finalStatus: CaveObject['status'] = 'active';
+    const needsManualReview = config.enablePend && session.cid !== config.adminChannel;
+    if (needsManualReview) {
+      if (config.enableAI && config.enableApprove && analysisResult) {
+        if (analysisResult.rating >= config.approveThreshold) {
+          finalStatus = 'active';
+        } else if (config.onAIReviewFail) {
+          finalStatus = 'pending';
+        } else {
+          await session.send(`回声洞（${newId}）添加失败：AI 审核未通过 (评分: ${analysisResult.rating})`);
+          await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+          await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+          return;
+        }
+      } else {
+        finalStatus = 'pending';
+      }
+    }
+    await ctx.database.upsert('cave', [{ id: newId, status: finalStatus, elements: newCave.elements }]);
+    if (finalStatus === 'pending' && reviewManager) reviewManager.sendForPend({ ...newCave, status: finalStatus });
+  } catch (error) {
+    logger.error(`回声洞（${newId}）处理失败:`, error);
+    await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+    await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+    await session.send(`回声洞（${newId}）处理失败: ${error.message}`);
+  }
 }

@@ -5,7 +5,7 @@ import { DataManager } from './DataManager'
 import { PendManager } from './PendManager'
 import { HashManager, CaveHashObject } from './HashManager'
 import { AIManager, CaveMetaObject } from './AIManager'
-import * as utils from './Utils'
+import * as utils from './Utils' // 确保这里引入了所有 utils 函数
 
 export const name = 'best-cave'
 export const inject = ['database']
@@ -143,6 +143,7 @@ export interface Config {
   }[];
   enableApprove: boolean;
   approveThreshold: number;
+  onAIReviewFail: boolean;
   systemPrompt: string;
 }
 
@@ -163,7 +164,8 @@ export const Config: Schema<Config> = Schema.intersect([
   Schema.object({
     enableAI: Schema.boolean().default(false).description("启用 AI"),
     enableApprove: Schema.boolean().default(false).description("启用自动审核"),
-    approveThreshold: Schema.number().min(0).max(100).step(1).default(80).description('评分阈值'),
+    onAIReviewFail: Schema.boolean().default(true).description("拒绝时转人工"),
+    approveThreshold: Schema.number().min(0).max(100).step(1).default(60).description('评分阈值'),
     endpoints: Schema.array(Schema.object({
       url: Schema.string().description('端点 (Endpoint)').role('link').required(),
       key: Schema.string().description('密钥 (API Key)').role('secret'),
@@ -264,77 +266,12 @@ export function apply(ctx: Context, config: Config) {
       const { finalElementsForDb, mediaToSave } = await utils.processMessageElements(sourceElements, newId, session, creationTime);
       // logger.info(`数据库元素: \n${JSON.stringify(finalElementsForDb, null, 2)}`); // 请勿删除此行
       if (finalElementsForDb.length === 0) return "无可添加内容";
-      const userName = (config.enableName ? await profileManager.getNickname(session.userId) : null) || session.username;
-      const needsReview = config.enablePend && session.cid !== config.adminChannel;
-      const finalStatus: CaveObject['status'] = needsReview ? 'pending' : 'active';
-      const newCave = await ctx.database.create('cave', {
-        id: newId,
-        elements: finalElementsForDb,
-        channelId: session.channelId,
-        userId: session.userId,
-        userName,
-        status: finalStatus,
-        time: creationTime,
-      });
-      session.send(needsReview ? `提交成功，序号为（${newCave.id}）` : `添加成功，序号为（${newCave.id}）`);
-      (async () => {
-        try {
-          const hasMedia = mediaToSave.length > 0;
-          const downloadedMedia: { fileName: string, buffer: Buffer }[] = [];
-          if (hasMedia) {
-            for (const media of mediaToSave) {
-              const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 30000 }));
-              downloadedMedia.push({ fileName: media.fileName, buffer });
-            }
-          }
-          let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-          let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-          if (hashManager) {
-            for (const media of downloadedMedia) media.buffer = hashManager.sanitizeImageBuffer(media.buffer);
-            const checkResult = await utils.performSimilarityChecks(ctx, config, hashManager, logger, finalElementsForDb, downloadedMedia);
-            if (checkResult.duplicate) {
-              await session.send(`回声洞（${newId}）添加失败：${checkResult.message}`);
-              await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-              await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
-              return;
-            }
-            textHashesToStore = checkResult.textHashesToStore;
-            imageHashesToStore = checkResult.imageHashesToStore;
-          }
-          if (aiManager) {
-            const duplicateIds = await aiManager.checkForDuplicates(finalElementsForDb, downloadedMedia);
-            if (duplicateIds?.length > 0) {
-              await session.send(`回声洞（${newId}）添加失败：内容与回声洞（${duplicateIds.join('|')}）重复`);
-              await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-              await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
-              return;
-            }
-          }
-          if (hasMedia) await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
-          let analysisResult: CaveMetaObject | undefined;
-          if (aiManager) {
-            const analyses = await aiManager.analyze([newCave], downloadedMedia);
-            if (analyses.length > 0) {
-              analysisResult = analyses[0];
-              await ctx.database.upsert('cave_meta', analyses);
-            }
-          }
-          if (hashManager) {
-            const allHashesToInsert = [...textHashesToStore, ...imageHashesToStore].map(h => ({ ...h, cave: newCave.id }));
-            if (allHashesToInsert.length > 0) await ctx.database.upsert('cave_hash', allHashesToInsert);
-          }
-          if (finalStatus === 'pending' && reviewManager) {
-            if (analysisResult && config.enableApprove && analysisResult.rating >= config.approveThreshold) {
-              await ctx.database.upsert('cave', [{ id: newCave.id, status: 'active' }]);
-            } else reviewManager.sendForPend(newCave);
-          }
-        } catch (error) {
-          logger.error(`回声洞（${newId}）处理失败:`, error);
-          await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-          await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
-          await session.send(`回声洞（${newId}）处理失败: ${error.message}`);
-        }
-      })();
+      const userName = (config.enableName && profileManager ? await profileManager.getNickname(session.userId) : null) || session.username;
+      const newCave: CaveObject = { id: newId, elements: finalElementsForDb, channelId: session.channelId, userId: session.userId, userName, status: 'preload', time: creationTime };
+      await ctx.database.create('cave', newCave);
+      const needsReviewImmediately = config.enablePend && session.cid !== config.adminChannel;
+      session.send(needsReviewImmediately ? `提交成功，序号为（${newCave.id}）` : `添加成功，序号为（${newCave.id}）`);
+      utils.processNewCave(ctx, config, fileManager, logger, reusableIds, newCave, session, mediaToSave, hashManager, aiManager, reviewManager);
     });
 
   cave.subcommand('.view <id:posint>', '查看指定回声洞')
