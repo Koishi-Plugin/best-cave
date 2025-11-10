@@ -27,7 +27,6 @@ declare module 'koishi' {
 export class AIManager {
   private http;
   private endpointIndex = 0;
-  private failureCount = 0;
   private retryTime = 0;
 
   /**
@@ -84,8 +83,8 @@ export class AIManager {
           await session.send(`开始分析 ${cavesToAnalyze.length} 个回声洞...`);
           let successCount = 0;
           let failedCount = 0;
-          for (let i = 0; i < cavesToAnalyze.length; i += 25) {
-            const batch = cavesToAnalyze.slice(i, i + 25);
+          for (let i = 0; i < cavesToAnalyze.length; i += 20) {
+            const batch = cavesToAnalyze.slice(i, i + 20);
             this.logger.info(`[${i + 1}/${cavesToAnalyze.length}] 正在分析 ${batch.length} 个回声洞...`);
             const results = await Promise.allSettled(batch.map(cave => this.analyze([cave])));
             const successfulAnalyses: CaveMetaObject[] = [];
@@ -296,7 +295,7 @@ export class AIManager {
    * @param {any[]} messages - 发送给 AI 的消息数组。
    * @param {string} systemPrompt - 系统提示词。
    * @returns {Promise<T>} - 一个 Promise，解析为从 AI 响应中解析出的 JSON 对象。
-   * @throws {Error} - 如果 AI 服务持续失败，则抛出错误。
+   * @throws {Error} - 如果 AI 服务持续失败或响应无法解析，则抛出错误。
    */
   private async requestAI<T>(messages: any[], systemPrompt: string): Promise<T> {
     const now = Date.now();
@@ -304,13 +303,20 @@ export class AIManager {
       const waitTime = this.retryTime - now;
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
+    const endpointConfig = this.config.endpoints[this.endpointIndex];
+    this.endpointIndex = (this.endpointIndex + 1) % this.config.endpoints.length;
+    const payload = { model: endpointConfig.model, messages: [{ role: 'system', content: systemPrompt }, ...messages] };
+    const fullUrl = `${endpointConfig.url.replace(/\/$/, '')}/chat/completions`;
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpointConfig.key}` };
+    let response;
     try {
-      const endpointConfig = this.config.endpoints[this.endpointIndex];
-      this.endpointIndex = (this.endpointIndex + 1) % this.config.endpoints.length;
-      const payload = { model: endpointConfig.model, messages: [{ role: 'system', content: systemPrompt }, ...messages] };
-      const fullUrl = `${endpointConfig.url.replace(/\/$/, '')}/chat/completions`;
-      const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpointConfig.key}` };
-      const response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
+      response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
+    } catch (httpError) {
+      this.retryTime = Date.now() + 30000;
+      this.logger.error(`请求失败:`, httpError);
+      throw httpError;
+    }
+    try {
       const content: string = response?.choices?.[0]?.message?.content;
       if (!content?.trim()) throw new Error;
       const potentialStrings = new Set<string>();
@@ -329,16 +335,14 @@ export class AIManager {
       for (const jsonString of potentialStrings) {
         try {
           const result = JSON.parse(jsonString);
-          this.failureCount = 0;
+          this.retryTime = 0;
           return result;
-        } catch (e) { /* Ignore */ }
+        } catch (e) { /* 忽略解析错误 */ }
       }
-      this.logger.error('原始响应:', JSON.stringify(response, null, 2));
       throw new Error;
-    } catch (error) {
-      this.failureCount++;
-      if (this.failureCount >= 3) this.retryTime = Date.now() + 60000;
-      throw error;
+    } catch (parsingError) {
+      this.logger.error('解析失败:', JSON.stringify(response, null, 2));
+      throw parsingError;
     }
   }
 }
