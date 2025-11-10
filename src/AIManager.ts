@@ -313,7 +313,6 @@ export class AIManager {
       response = await this.http.post(fullUrl, payload, { headers, timeout: 600000 });
     } catch (httpError) {
       this.retryTime = Date.now() + 30000;
-      this.logger.error(`请求失败:`, httpError);
       throw httpError;
     }
     try {
