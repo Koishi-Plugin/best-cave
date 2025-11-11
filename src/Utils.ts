@@ -205,6 +205,7 @@ export async function getNextCaveId(ctx: Context, reusableIds: Set<number>): Pro
  */
 export async function processMessageElements(sourceElements: h[], newId: number, session: Session, creationTime: Date): Promise<{ finalElementsForDb: StoredElement[], mediaToSave: { sourceUrl: string, fileName: string }[] }> {
   const mediaToSave: { sourceUrl: string, fileName: string }[] = [];
+  const urlToFileMap = new Map<string, string>();
   let mediaIndex = 0;
   const typeMap = { 'img': 'image', 'image': 'image', 'video': 'video', 'audio': 'audio', 'file': 'file', 'text': 'text', 'at': 'at', 'forward': 'forward', 'reply': 'reply', 'face': 'face' };
   const defaultExtMap = { 'image': '.jpg', 'video': '.mp4', 'audio': '.mp3', 'file': '.dat' };
@@ -224,11 +225,16 @@ export async function processMessageElements(sourceElements: h[], newId: number,
         } else if (['image', 'video', 'audio', 'file'].includes(sType) && (segment.data?.src || segment.data?.url)) {
           let fileIdentifier = (segment.data.src || segment.data.url) as string;
           if (fileIdentifier.startsWith('http')) {
-            const ext = path.extname(segment.data.file as string || '') || defaultExtMap[sType];
-            const currentMediaIndex = ++mediaIndex;
-            const fileName = `${newId}_${currentMediaIndex}_${session.channelId || session.guildId}_${session.userId}_${creationTime.getTime()}${ext}`;
-            mediaToSave.push({ sourceUrl: fileIdentifier, fileName });
-            fileIdentifier = fileName;
+            if (urlToFileMap.has(fileIdentifier)) {
+                fileIdentifier = urlToFileMap.get(fileIdentifier)!;
+            } else {
+                const ext = path.extname(segment.data.file as string || '') || defaultExtMap[sType];
+                const currentMediaIndex = ++mediaIndex;
+                const newFileName = `${newId}_${currentMediaIndex}_${session.channelId || session.guildId}_${session.userId}_${creationTime.getTime()}${ext}`;
+                mediaToSave.push({ sourceUrl: fileIdentifier, fileName: newFileName });
+                urlToFileMap.set(fileIdentifier, newFileName);
+                fileIdentifier = newFileName;
+            }
           }
           innerResult.push({ type: sType as any, file: fileIdentifier });
         } else if (sType === 'forward' && Array.isArray(segment.data?.content)) {
@@ -270,11 +276,16 @@ export async function processMessageElements(sourceElements: h[], newId: number,
       } else if (['image', 'video', 'audio', 'file'].includes(type) && el.attrs.src) {
         let fileIdentifier = el.attrs.src as string;
         if (fileIdentifier.startsWith('http')) {
-          const ext = path.extname(el.attrs.file as string || '') || defaultExtMap[type];
-          const currentMediaIndex = ++mediaIndex;
-          const fileName = `${newId}-${currentMediaIndex}_${session.channelId}-${session.userId}_${creationTime.getTime()}${ext}`;
-          mediaToSave.push({ sourceUrl: fileIdentifier, fileName });
-          fileIdentifier = fileName;
+            if (urlToFileMap.has(fileIdentifier)) {
+                fileIdentifier = urlToFileMap.get(fileIdentifier)!;
+            } else {
+                const ext = path.extname(el.attrs.file as string || '') || defaultExtMap[type];
+                const currentMediaIndex = ++mediaIndex;
+                const newFileName = `${newId}-${currentMediaIndex}_${session.channelId}-${session.userId}_${creationTime.getTime()}${ext}`;
+                mediaToSave.push({ sourceUrl: fileIdentifier, fileName: newFileName });
+                urlToFileMap.set(fileIdentifier, newFileName);
+                fileIdentifier = newFileName;
+            }
         }
         result.push({ type: type as any, file: fileIdentifier });
       } else if (type === 'face' && el.attrs.id) {
@@ -295,7 +306,6 @@ export async function performSimilarityChecks(ctx: Context, config: Config, hash
   duplicate: boolean; message?: string; textHashesToStore?: Omit<CaveHashObject, 'cave'>[]; imageHashesToStore?: Omit<CaveHashObject, 'cave'>[];}> {
   try {
     const textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-    const imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
     const combinedText = finalElementsForDb.filter(el => el.type === 'text' && typeof el.content === 'string').map(el => el.content).join(' ');
     if (combinedText) {
       const newSimhash = hashManager.generateTextSimhash(combinedText);
@@ -308,19 +318,22 @@ export async function performSimilarityChecks(ctx: Context, config: Config, hash
         textHashesToStore.push({ hash: newSimhash, type: 'text' });
       }
     }
+    let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
     if (downloadedMedia.length > 0) {
-      const allExistingImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
+      const dbImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
+      const newImageHashes = new Set<string>();
       for (const media of downloadedMedia) {
         if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
           const imageHash = await hashManager.generatePHash(media.buffer);
-          for (const existing of allExistingImageHashes) {
+          if (newImageHashes.has(imageHash)) continue;
+          for (const existing of dbImageHashes) {
             const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
             if (similarity >= config.imageThreshold) return { duplicate: true, message: `图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
           }
-          imageHashesToStore.push({ hash: imageHash, type: 'image' });
-          allExistingImageHashes.push({ cave: 0, hash: imageHash, type: 'image' });
+          newImageHashes.add(imageHash);
         }
       }
+      imageHashesToStore = Array.from(newImageHashes).map(hash => ({ hash, type: 'image' }));
     }
     return { duplicate: false, textHashesToStore, imageHashesToStore };
   } catch (error) {
@@ -426,19 +439,40 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
   mediaToSave: { sourceUrl: string, fileName: string }[], hashManager: HashManager | null, aiManager: AIManager | null, reviewManager: PendManager | null,): Promise<void> {
   const newId = newCave.id;
   try {
-    let downloadedMedia: { fileName: string, buffer: Buffer }[] = [];
+    const initialDownloads: { candidateFile: string, buffer: Buffer }[] = [];
     if (mediaToSave.length > 0) {
-      const downloadPromises = mediaToSave.map(async (media) => {
-        const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 60000 }));
-        return { fileName: media.fileName, buffer };
-      });
-      downloadedMedia = await Promise.all(downloadPromises);
+        const downloadPromises = mediaToSave.map(async (media) => {
+            const buffer = Buffer.from(await ctx.http.get(media.sourceUrl, { responseType: 'arraybuffer', timeout: 60000 }));
+            return { candidateFile: media.fileName, buffer };
+        });
+        initialDownloads.push(...await Promise.all(downloadPromises));
+    }
+    const hashToCanonicalFile = new Map<string, string>();
+    const canonicalFilesToSave = new Map<string, Buffer>();
+    const fileRemapping = new Map<string, string>();
+    const mediaForProcessing: { fileName: string, buffer: Buffer }[] = [];
+    if (hashManager) {
+        for (const download of initialDownloads) {
+            if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(download.candidateFile).toLowerCase())) download.buffer = hashManager.sanitizeImageBuffer(download.buffer);
+            const hash = await hashManager.generatePHash(download.buffer);
+            if (hashToCanonicalFile.has(hash)) {
+                fileRemapping.set(download.candidateFile, hashToCanonicalFile.get(hash)!);
+            } else {
+                hashToCanonicalFile.set(hash, download.candidateFile);
+                canonicalFilesToSave.set(download.candidateFile, download.buffer);
+                fileRemapping.set(download.candidateFile, download.candidateFile);
+                mediaForProcessing.push({ fileName: download.candidateFile, buffer: download.buffer });
+            }
+        }
+        newCave.elements.forEach(el => { if (el.file && fileRemapping.has(el.file)) el.file = fileRemapping.get(el.file) });
+    } else {
+        initialDownloads.forEach(d => canonicalFilesToSave.set(d.candidateFile, d.buffer));
+        mediaForProcessing.push(...initialDownloads.map(d => ({ fileName: d.candidateFile, buffer: d.buffer })));
     }
     let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
     let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
     if (config.enableSimilarity && hashManager) {
-      for (const media of downloadedMedia) if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) media.buffer = hashManager.sanitizeImageBuffer(media.buffer);
-      const checkResult = await performSimilarityChecks(ctx, config, hashManager, logger, newCave.elements, downloadedMedia);
+      const checkResult = await performSimilarityChecks(ctx, config, hashManager, logger, newCave.elements, mediaForProcessing);
       if (checkResult.duplicate) {
         await session.send(`回声洞（${newId}）添加失败：${checkResult.message}`);
         await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
@@ -448,10 +482,10 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
       textHashesToStore = checkResult.textHashesToStore || [];
       imageHashesToStore = checkResult.imageHashesToStore || [];
     }
-    if (downloadedMedia.length > 0) await Promise.all(downloadedMedia.map(item => fileManager.saveFile(item.fileName, item.buffer)));
+    if (canonicalFilesToSave.size > 0) await Promise.all(Array.from(canonicalFilesToSave.entries()).map(([fileName, buffer]) => fileManager.saveFile(fileName, buffer)));
     let analysisResult: CaveMetaObject | undefined;
     if (config.enableAI && aiManager) {
-      const analyses = await aiManager.analyze([newCave], downloadedMedia);
+      const analyses = await aiManager.analyze([newCave], mediaForProcessing);
       if (analyses.length > 0) {
         analysisResult = analyses[0];
         await ctx.database.upsert('cave_meta', analyses);

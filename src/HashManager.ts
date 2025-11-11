@@ -131,10 +131,12 @@ export class HashManager {
             }
             return { id: hashObj.cave, keys };
           });
-          const hashLookup = new Map<number, { text?: string, image?: string }>();
+          const hashLookup = new Map<number, { text: string[], image: string[] }>();
           allHashes.forEach(h => {
-              if (!hashLookup.has(h.cave)) hashLookup.set(h.cave, {});
-              hashLookup.get(h.cave)[h.type] = h.hash;
+              if (!hashLookup.has(h.cave)) hashLookup.set(h.cave, { text: [], image: [] });
+              const entry = hashLookup.get(h.cave);
+              if (h.type === 'text') entry.text.push(h.hash);
+              else if (h.type === 'image') entry.image.push(h.hash);
           });
           const textPairs: { id1: number, id2: number, similarity: number }[] = [];
           const imagePairs: { id1: number, id2: number, similarity: number }[] = [];
@@ -142,13 +144,21 @@ export class HashManager {
             const [id1, id2] = pairKey.split('-').map(Number);
             const cave1Hashes = hashLookup.get(id1);
             const cave2Hashes = hashLookup.get(id2);
-            if (cave1Hashes?.text && cave2Hashes?.text) {
-              const similarity = this.calculateSimilarity(cave1Hashes.text, cave2Hashes.text);
-              if (similarity >= textThreshold) textPairs.push({ id1, id2, similarity });
+            if (cave1Hashes?.text.length && cave2Hashes?.text.length) {
+              for (const hash1 of cave1Hashes.text) {
+                for (const hash2 of cave2Hashes.text) {
+                  const similarity = this.calculateSimilarity(hash1, hash2);
+                  if (similarity >= textThreshold) textPairs.push({ id1, id2, similarity });
+                }
+              }
             }
-            if (cave1Hashes?.image && cave2Hashes?.image) {
-              const similarity = this.calculateSimilarity(cave1Hashes.image, cave2Hashes.image);
-              if (similarity >= imageThreshold) imagePairs.push({ id1, id2, similarity });
+            if (cave1Hashes?.image.length && cave2Hashes?.image.length) {
+              for (const hash1 of cave1Hashes.image) {
+                for (const hash2 of cave2Hashes.image) {
+                  const similarity = this.calculateSimilarity(hash1, hash2);
+                  if (similarity >= imageThreshold) imagePairs.push({ id1, id2, similarity });
+                }
+              }
             }
           }
           if (textPairs.length === 0 && imagePairs.length === 0) return '未发现高相似度的内容';
@@ -245,6 +255,7 @@ export class HashManager {
     const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
     const JPEG_SIGNATURE = Buffer.from([0xFF, 0xD8]);
     const GIF_SIGNATURE = Buffer.from('GIF');
+    const WEBP_SIGNATURE = Buffer.from('WEBP');
     let sanitizedBuffer = imageBuffer;
     if (imageBuffer.slice(0, 8).equals(PNG_SIGNATURE)) {
         const IEND_CHUNK = Buffer.from('IEND');
@@ -267,6 +278,10 @@ export class HashManager {
             const endOfGifData = terminatorIndex + 1;
             if (imageBuffer.length > endOfGifData) sanitizedBuffer = imageBuffer.slice(0, endOfGifData);
         }
+    } else if (imageBuffer.slice(8, 12).equals(WEBP_SIGNATURE)) {
+        const fileSize = imageBuffer.readUInt32LE(4);
+        const expectedLength = fileSize + 8;
+        if (imageBuffer.length > expectedLength) sanitizedBuffer = imageBuffer.slice(0, expectedLength);
     }
     return sanitizedBuffer;
   }
