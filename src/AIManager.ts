@@ -193,12 +193,15 @@ export class AIManager {
       .option('count', '-n <limit:posint> 显示数量', { fallback: 30 })
       .option('greater', '-g <rating:number> 显示下限')
       .option('less', '-l <rating:number> 显示上限')
+      .option('pending', '-p 查询待审核回声洞')
       .action(async ({ session, options }) => {
         if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
         try {
-          const activeCaves = await this.ctx.database.get('cave', { status: 'active' }, { fields: ['id'] });
-          const activeCaveIds = activeCaves.map(c => c.id);
-          const metaQuery: any = { cave: { $in: activeCaveIds } };
+          const statusToQuery = options.pending ? 'pending' : 'active';
+          const caves = await this.ctx.database.get('cave', { status: statusToQuery }, { fields: ['id'] });
+          const caveIds = caves.map(c => c.id);
+          if (caveIds.length === 0) return `暂无${statusToQuery === 'pending' ? '待审核' : '已通过'}的回声洞`;
+          const metaQuery: any = { cave: { $in: caveIds } };
           if (options.greater !== undefined) metaQuery.rating = { ...metaQuery.rating, $gte: options.greater };
           if (options.less !== undefined) metaQuery.rating = { ...metaQuery.rating, $lte: options.less };
           const rankedMeta = await this.ctx.database.get('cave_meta', metaQuery);
@@ -208,7 +211,7 @@ export class AIManager {
           const formattedEntries = topMeta.map(meta => `${meta.cave}(${meta.rating})`);
           const reportChunks = [];
           for (let i = 0; i < formattedEntries.length; i += 3) reportChunks.push(formattedEntries.slice(i, i + 3).join('|'));
-          let report = `回声洞评分排行:\n`;
+          let report = `${statusToQuery === 'pending' ? '待审核' : ''}回声洞评分排行:\n`;
           report += reportChunks.join('\n');
           return report.trim();
         } catch (error) {

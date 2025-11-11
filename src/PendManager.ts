@@ -77,6 +77,28 @@ export class PendManager {
     pend.subcommand('.N [...ids:posint]', '拒绝审核')
       .usage('拒绝一个或多个指定 ID 的回声洞审核。若不指定 ID，则拒绝所有待审核的回声洞。')
       .action(createPendAction('reject'));
+    if (this.config.enableAI) {
+      pend.subcommand('.A <threshold:number>', '自动通过审核')
+        .usage('根据评分自动通过不小于指定阈值的回声洞。默认使用配置中的阈值。')
+        .action(async ({ session }, threshold) => {
+          const adminError = requireAdmin(session, this.config);
+          if (adminError) return adminError;
+          const finalThreshold = threshold ?? this.config.approveThreshold;
+          try {
+            const pendingCaves = await this.ctx.database.get('cave', { status: 'pending' });
+            if (pendingCaves.length === 0) return '当前没有需要审核的回声洞';
+            const pendingCaveIds = pendingCaves.map(c => c.id);
+            const pendingMeta = await this.ctx.database.get('cave_meta', { cave: { $in: pendingCaveIds } });
+            const idsToApprove = pendingMeta.filter(meta => meta.rating >= finalThreshold).map(meta => meta.cave);
+            if (idsToApprove.length === 0) return `没有找到评分不小于 ${finalThreshold} 的待审核回声洞`;
+            await this.ctx.database.upsert('cave', idsToApprove.map(id => ({ id, status: 'active' })));
+            return `已自动通过回声洞（${idsToApprove.join('|')}）`;
+          } catch (error) {
+            this.logger.error('自动审核操作失败:', error);
+            return `操作失败: ${error.message}`;
+          }
+        });
+    }
   }
 
   /**

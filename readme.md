@@ -50,6 +50,7 @@
 | `cave.pend <序号>` | `enablePend: true` | **(管理)** 查看指定待审核内容的详情。 |
 | `cave.pend.Y [...序号]` | `enablePend: true` | **(管理)** 通过审核。若不提供序号，则通过所有待审核内容。 |
 | `cave.pend.N [...序号]` | `enablePend: true` | **(管理)** 拒绝审核。若不提供序号，则拒绝所有待审核内容。 |
+| `cave.pend.A <阈值>` | `enablePend: true`, `enableAI: true` | **(管理)** 根据 AI 评分自动通过审核，通过所有评分不低于指定阈值的内容。 |
 | `cave.export` | `enableIO: true` | **(管理)** 将所有`active`状态的回声洞导出到 `data/cave/cave.json`。 |
 | `cave.import` | `enableIO: true` | **(管理)** 从 `data/cave/cave.json` 文件中导入数据。 |
 | `cave.hash` | `enableSimilarity: true` | **(管理)** 校验所有历史数据，为缺失哈希的回声洞补全记录。 |
@@ -57,7 +58,7 @@
 | `cave.fix [...序号]` | `enableSimilarity: true`| **(管理)** 扫描并修复回声洞中的图片（移除多余数据）。可指定ID或扫描全部。 |
 | `cave.ai` | `enableAI: true` | **(管理)** 分析所有历史数据，为缺失AI元数据的回声洞补全记录。 |
 | `cave.compare` | `enableAI: true` | **(管理)** 检查所有回声洞的AI关键词，生成一份关于内容重复性的报告。 |
-| `cave.rank` | `enableAI: true` | **(管理)** 查询 AI 评分排行，支持 `-n` (数量), `-g` (下限), `-l` (上限) 选项。 |
+| `cave.rank` | `enableAI: true` | **(管理)** 查询 AI 评分排行，支持 `-n` (数量), `-g` (下限), `-l` (上限), `-p` (查询待审核) 选项。 |
 
 ## ⚙️ 配置说明
 
