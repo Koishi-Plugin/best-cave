@@ -189,7 +189,7 @@ export class AIManager {
         .filter(meta => {
           if (meta.cave === newCave.id) return false;
           const existingTags = [meta.type, ...(meta.keywords || [])];
-          return this.calculateSimilarity(allNewTags, existingTags) >= 80;
+          return this.calculateSimilarity(allNewTags, existingTags) >= 90;
         })
         .map(meta => meta.cave);
       if (similarCaveIds.length === 0) return [];
