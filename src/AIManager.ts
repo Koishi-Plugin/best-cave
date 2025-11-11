@@ -130,7 +130,7 @@ export class AIManager {
               const tags1 = combinedTags(meta1);
               const tags2 = combinedTags(meta2);
               const similarity = this.calculateSimilarity(tags1, tags2);
-              if (similarity >= 80) {
+              if (similarity >= 75) {
                 const sortedPairKey = [id1, id2].sort((a, b) => a - b).join('-');
                 filteredPairs.add(sortedPairKey);
               }
@@ -206,7 +206,7 @@ export class AIManager {
         .filter(meta => {
           if (meta.cave === newCave.id) return false;
           const existingTags = [meta.type, ...(meta.keywords || [])];
-          return this.calculateSimilarity(allNewTags, existingTags) >= 80;
+          return this.calculateSimilarity(allNewTags, existingTags) >= 75;
         })
         .map(meta => meta.cave);
       if (similarCaveIds.length === 0) return [];
