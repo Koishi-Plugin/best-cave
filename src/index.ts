@@ -221,9 +221,9 @@ export function apply(ctx: Context, config: Config) {
   });
 
   const cave = ctx.command('cave', '回声洞')
-    .option('add', '-a <content:text> 添加回声洞')
-    .option('view', '-g <id:posint> 查看指定回声洞')
-    .option('delete', '-r <id:posint> 删除指定回声洞')
+    .option('add', '-a [content:text] 添加回声洞')
+    .option('view', '-g [id:posint] 查看指定回声洞')
+    .option('delete', '-r [id:posint] 删除指定回声洞')
     .option('list', '-l 查询投稿统计')
     .usage('随机抽取一条已添加的回声洞。')
     .action(async ({ session, options }) => {
