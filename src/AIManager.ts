@@ -32,14 +32,14 @@ export class AIManager {
   /**
    * @description 用于分析的 AI 系统提示词。
    */
-  private readonly ANALYSIS_SYSTEM_PROMPT = `你需要分析给定的内容，并按照以下规则进行评分、分类和提取内容中的关键词。
-你的回复必须且只能是一个JSON对象，禁止含有解释说明等其他文字，只包含rating、type和keywords，例如{"rating": 88,"type": "Game","keywords": ["Minecraft", "Nether"]}。`;
+  private readonly ANALYSIS_SYSTEM_PROMPT = `你需要分析给定的内容，并按照以下规则进行评分和分类，并提取内容中的关键词，然后输出回复。
+你的回复必须且只能是一个JSON对象，严禁含有注释说明等其他文字，例: {"rating": 88,"type": "Game","keywords": ["Minecraft", "Nether"]}。`;
 
   /**
    * @description 用于查重的 AI 系统提示词。
    */
-  private readonly DUPLICATE_SYSTEM_PROMPT = `你需要比较给定的“新内容”与“候选内容”，识别内容语义或核心思想重复的候选内容。
-你的回复必须且只能是一个JSON数组，禁止含有解释说明等其他文字，只包含重复项ID，例如[1, 2]，若无重复，则返回[]。`;
+  private readonly DUPLICATE_SYSTEM_PROMPT = `你需要比较给定的“新内容”与“候选内容”，判断是否内容近似或仅存在细微差异。
+你的回复必须且只能是一个JSON数组，严禁含有注释说明等其他文字，只包含与新内容重复的候选内容的ID，例: [1, 2]或[]（若无重复）`;
 
   /**
    * @constructor
