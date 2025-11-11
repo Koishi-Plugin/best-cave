@@ -180,8 +180,9 @@ export class AIManager {
       const allMeta = await this.ctx.database.get('cave_meta', { type: newAnalysis.type }, { fields: ['cave', 'type', 'keywords'] });
       const similarCaveIds = allMeta
         .filter(meta => {
-            const existingTags = [meta.type, ...(meta.keywords || [])];
-            return this.calculateSimilarity(allNewTags, existingTags) >= 80;
+          if (meta.cave === newCave.id) return false;
+          const existingTags = [meta.type, ...(meta.keywords || [])];
+          return this.calculateSimilarity(allNewTags, existingTags) >= 80;
         })
         .map(meta => meta.cave);
       if (similarCaveIds.length === 0) return [];
