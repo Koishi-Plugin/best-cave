@@ -120,9 +120,26 @@ export class AIManager {
           const combinedTags = (meta: CaveMetaObject) => [meta.type, ...(meta.keywords || [])].filter(Boolean);
           const candidatePairs = generateFromLSH(allMeta, (meta) => ({ id: meta.cave, keys: combinedTags(meta) }));
           if (candidatePairs.size === 0) return '未发现相似内容';
+          const metaMap = new Map(allMeta.map(meta => [meta.cave, meta]));
+          const filteredPairs = new Set<string>();
+          for (const pairKey of candidatePairs) {
+            const [id1, id2] = pairKey.split('-').map(Number);
+            const meta1 = metaMap.get(id1);
+            const meta2 = metaMap.get(id2);
+            if (meta1 && meta2) {
+              const tags1 = combinedTags(meta1);
+              const tags2 = combinedTags(meta2);
+              const similarity = this.calculateSimilarity(tags1, tags2);
+              if (similarity >= 80) {
+                const sortedPairKey = [id1, id2].sort((a, b) => a - b).join('-');
+                filteredPairs.add(sortedPairKey);
+              }
+            }
+          }
+          if (filteredPairs.size === 0) return '未发现相似内容';
           const groupedCandidates = new Map<number, Set<number>>();
           const allCaveIds = new Set<number>();
-          candidatePairs.forEach(pairKey => {
+          filteredPairs.forEach(pairKey => {
             const [id1, id2] = pairKey.split('-').map(Number);
             if (!groupedCandidates.has(id1)) groupedCandidates.set(id1, new Set());
             groupedCandidates.get(id1)!.add(id2);
@@ -189,7 +206,7 @@ export class AIManager {
         .filter(meta => {
           if (meta.cave === newCave.id) return false;
           const existingTags = [meta.type, ...(meta.keywords || [])];
-          return this.calculateSimilarity(allNewTags, existingTags) >= 90;
+          return this.calculateSimilarity(allNewTags, existingTags) >= 80;
         })
         .map(meta => meta.cave);
       if (similarCaveIds.length === 0) return [];
