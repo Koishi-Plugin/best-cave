@@ -188,6 +188,34 @@ export class AIManager {
           return `检查失败: ${error.message}`;
         }
       });
+
+    cave.subcommand('.rank', '查询评分排行', { hidden: true })
+      .option('count', '-n <limit:posint> 显示数量', { fallback: 30 })
+      .option('greater', '-g <rating:number> 显示下限')
+      .option('less', '-l <rating:number> 显示上限')
+      .action(async ({ session, options }) => {
+        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        try {
+          const activeCaves = await this.ctx.database.get('cave', { status: 'active' }, { fields: ['id'] });
+          const activeCaveIds = activeCaves.map(c => c.id);
+          const metaQuery: any = { cave: { $in: activeCaveIds } };
+          if (options.greater !== undefined) metaQuery.rating = { ...metaQuery.rating, $gte: options.greater };
+          if (options.less !== undefined) metaQuery.rating = { ...metaQuery.rating, $lte: options.less };
+          const rankedMeta = await this.ctx.database.get('cave_meta', metaQuery);
+          if (rankedMeta.length === 0) return '暂无相符的评分记录';
+          const sortedMeta = rankedMeta.sort((a, b) => b.rating - a.rating);
+          const topMeta = sortedMeta.slice(0, options.count);
+          const formattedEntries = topMeta.map(meta => `${meta.cave}(${meta.rating})`);
+          const reportChunks = [];
+          for (let i = 0; i < formattedEntries.length; i += 3) reportChunks.push(formattedEntries.slice(i, i + 3).join('|'));
+          let report = `回声洞评分排行:\n`;
+          report += reportChunks.join('\n');
+          return report.trim();
+        } catch (error) {
+          this.logger.error('查询评分排行失败:', error);
+          return `查询失败: ${error.message}`;
+        }
+      });
   }
 
   /**
