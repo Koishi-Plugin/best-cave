@@ -129,6 +129,13 @@ export class AIManager {
             allCaveIds.add(id1);
             allCaveIds.add(id2);
           });
+          let preliminaryReport = `共发现 ${groupedCandidates.size} 组可能相似的内容:`;
+          for (const [mainId, candidateIdsSet] of groupedCandidates.entries()) {
+            const cluster = [mainId, ...Array.from(candidateIdsSet)].sort((a, b) => a - b);
+            preliminaryReport += `\n- ${cluster.join('|')}`;
+          }
+          preliminaryReport += '\n正在分析，请稍候...';
+          await session.send(preliminaryReport);
           const caveData = await this.ctx.database.get('cave', { id: { $in: Array.from(allCaveIds) }, status: 'active' });
           const allCaves = new Map(caveData.map(c => [c.id, c]));
           const duplicatePairs: { id1: number; id2: number }[] = [];
