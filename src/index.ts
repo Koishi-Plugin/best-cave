@@ -218,7 +218,7 @@ export function apply(ctx: Context, config: Config) {
         reusableIds.delete(0);
         idsToDelete.forEach(id => reusableIds.add(id));
         await ctx.database.remove('cave', { id: { $in: idsToDelete } });
-        await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
+        if (config.enableSimilarity) await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
         if (config.enableAI) await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
       }
     } catch (error) {
