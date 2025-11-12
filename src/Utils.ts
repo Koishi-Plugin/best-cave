@@ -264,94 +264,41 @@ export async function processMessageElements(sourceElements: h[], newId: number,
 }
 
 /**
- * @description 执行文本 (Simhash) 和图片 (pHash) 相似度查重。
- * @returns 一个对象，指示是否发现重复项；如果未发现，则返回生成的哈希。
+ * @description 根据提供的配对关系，将项目 ID 进行聚类。
+ * @param pairs 一个由 [number, number] 组成的数组，代表需要合并的项目 ID 配对。
+ * @returns 返回一个二维数组，每个子数组代表一个大小大于1的聚类。
  */
-export async function performSimilarityChecks(ctx: Context, config: Config, hashManager: HashManager, logger: Logger, finalElementsForDb: StoredElement[], downloadedMedia: { fileName: string, buffer: Buffer }[]): Promise<{
-  duplicate: boolean; message?: string; textHashesToStore?: Omit<CaveHashObject, 'cave'>[]; imageHashesToStore?: Omit<CaveHashObject, 'cave'>[];}> {
-  try {
-    const textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-    const combinedText = finalElementsForDb.filter(el => el.type === 'text' && typeof el.content === 'string').map(el => el.content).join(' ');
-    if (combinedText) {
-      const newSimhash = hashManager.generateTextSimhash(combinedText);
-      if (newSimhash) {
-        const existingTextHashes = await ctx.database.get('cave_hash', { type: 'text' });
-        for (const existing of existingTextHashes) {
-          const similarity = hashManager.calculateSimilarity(newSimhash, existing.hash);
-          if (similarity >= config.textThreshold) return { duplicate: true, message: `文本与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
-        }
-        textHashesToStore.push({ hash: newSimhash, type: 'text' });
-      }
-    }
-    let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
-    if (downloadedMedia.length > 0) {
-      const dbImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
-      const newImageHashes = new Set<string>();
-      for (const media of downloadedMedia) {
-        if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
-          const imageHash = await hashManager.generatePHash(media.buffer);
-          if (newImageHashes.has(imageHash)) continue;
-          for (const existing of dbImageHashes) {
-            const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
-            if (similarity >= config.imageThreshold) return { duplicate: true, message: `图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值` };
-          }
-          newImageHashes.add(imageHash);
-        }
-      }
-      imageHashesToStore = Array.from(newImageHashes).map(hash => ({ hash, type: 'image' }));
-    }
-    return { duplicate: false, textHashesToStore, imageHashesToStore };
-  } catch (error) {
-    logger.warn('相似度比较失败:', error);
-    return { duplicate: false, textHashesToStore: [], imageHashesToStore: [] };
-  }
-}
-
-/**
- * @description 校验会话是否来自指定的管理群组。
- * @param session 当前会话。
- * @param config 插件配置。
- * @returns 如果校验不通过，返回错误信息字符串；如果通过，返回 null。
- */
-export function requireAdmin(session: Session, config: Config): string | null {
-  if (session.cid !== config.adminChannel) return '此指令仅限在管理群组中使用';
-  return null;
-}
-
-/**
- * @class DSU
- * @description 一个通用的并查集（Disjoint Set Union）数据结构，用于高效地处理集合的合并与查找。
- * 非常适合用于将相似或重复的项进行聚类。
- */
-export class DSU {
-  private parent: Map<number, number> = new Map();
-
-  /**
-   * 查找元素的根节点，并进行路径压缩优化。
-   * @param i - 要查找的元素 ID。
-   * @returns 元素的根节点 ID。
-   */
-  find(i: number): number {
-    if (!this.parent.has(i)) {
-      this.parent.set(i, i);
+export function clusterItemsFromPairs(pairs: [number, number][]): number[][] {
+  const parent = new Map<number, number>();
+  const allIds = new Set<number>();
+  const find = (i: number): number => {
+    if (!parent.has(i)) {
+      parent.set(i, i);
       return i;
     }
-    if (this.parent.get(i) === i) return i;
-    const root = this.find(this.parent.get(i)!);
-    this.parent.set(i, root);
+    if (parent.get(i) === i) return i;
+    const root = find(parent.get(i)!);
+    parent.set(i, root);
     return root;
+  };
+  const union = (i: number, j: number): void => {
+    const rootI = find(i);
+    const rootJ = find(j);
+    if (rootI !== rootJ) parent.set(rootI, rootJ);
+  };
+  for (const [id1, id2] of pairs) {
+    union(id1, id2);
+    allIds.add(id1);
+    allIds.add(id2);
   }
-
-  /**
-   * 合并两个元素所在的集合。
-   * @param i - 第一个元素。
-   * @param j - 第二个元素。
-   */
-  union(i: number, j: number): void {
-    const rootI = this.find(i);
-    const rootJ = this.find(j);
-    if (rootI !== rootJ) this.parent.set(rootI, rootJ);
-  }
+  if (allIds.size === 0) return [];
+  const clusterMap = new Map<number, number[]>();
+  allIds.forEach(id => {
+    const root = find(id);
+    if (!clusterMap.has(root)) clusterMap.set(root, []);
+    clusterMap.get(root)!.push(id);
+  });
+  return Array.from(clusterMap.values()).filter(c => c.length > 1);
 }
 
 /**
@@ -437,14 +384,46 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
     let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
     let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
     if (config.enableSimilarity && hashManager) {
-      const checkResult = await performSimilarityChecks(ctx, config, hashManager, logger, newCave.elements, mediaForProcessing);
-      if (checkResult.duplicate) {
-        await session.send(`回声洞（${newId}）添加失败：${checkResult.message}`);
-        await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-        return;
+      try {
+        const combinedText = newCave.elements.filter(el => el.type === 'text' && typeof el.content === 'string').map(el => el.content).join(' ');
+        if (combinedText) {
+          const newSimhash = hashManager.generateTextSimhash(combinedText);
+          if (newSimhash) {
+            const existingTextHashes = await ctx.database.get('cave_hash', { type: 'text' });
+            for (const existing of existingTextHashes) {
+              const similarity = hashManager.calculateSimilarity(newSimhash, existing.hash);
+              if (similarity >= config.textThreshold) {
+                await session.send(`回声洞（${newId}）添加失败：文本与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值`);
+                await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+                return;
+              }
+            }
+            textHashesToStore.push({ hash: newSimhash, type: 'text' });
+          }
+        }
+        if (mediaForProcessing.length > 0) {
+          const dbImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
+          const newImageHashes = new Set<string>();
+          for (const media of mediaForProcessing) {
+            if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
+              const imageHash = await hashManager.generatePHash(media.buffer);
+              if (newImageHashes.has(imageHash)) continue;
+              for (const existing of dbImageHashes) {
+                const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
+                if (similarity >= config.imageThreshold) {
+                  await session.send(`回声洞（${newId}）添加失败：图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值`);
+                  await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+                  return;
+                }
+              }
+              newImageHashes.add(imageHash);
+            }
+          }
+          imageHashesToStore = Array.from(newImageHashes).map(hash => ({ hash, type: 'image' }));
+        }
+      } catch (error) {
+        logger.warn('相似度比较失败:', error);
       }
-      textHashesToStore = checkResult.textHashesToStore || [];
-      imageHashesToStore = checkResult.imageHashesToStore || [];
     }
     if (canonicalFilesToSave.size > 0) await Promise.all(Array.from(canonicalFilesToSave.entries()).map(([fileName, buffer]) => fileManager.saveFile(fileName, buffer)));
     let analysisResult: CaveMetaObject | undefined;

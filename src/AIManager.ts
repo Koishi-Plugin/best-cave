@@ -2,7 +2,7 @@ import { Context, Logger } from 'koishi';
 import { Config, CaveObject, StoredElement } from './index';
 import { FileManager } from './FileManager';
 import * as path from 'path';
-import { requireAdmin, DSU, generateFromLSH } from './Utils';
+import { clusterItemsFromPairs, generateFromLSH } from './Utils';
 
 /**
  * @description 定义了数据库 \`cave_meta\` 表的结构模型。
@@ -165,20 +165,8 @@ export class AIManager {
             }
           }
           if (duplicatePairs.length === 0) return '未发现高重复性的内容';
-          const dsu = new DSU();
-          const finalIds = new Set<number>();
-          duplicatePairs.forEach(p => {
-            dsu.union(p.id1, p.id2);
-            finalIds.add(p.id1);
-            finalIds.add(p.id2);
-          });
-          const clusters = new Map<number, number[]>();
-          finalIds.forEach(id => {
-            const root = dsu.find(id);
-            if (!clusters.has(root)) clusters.set(root, []);
-            clusters.get(root)!.push(id);
-          });
-          const validClusters = Array.from(clusters.values()).filter(c => c.length > 1);
+          const numericPairs: [number, number][] = duplicatePairs.map(p => [p.id1, p.id2]);
+          const validClusters = clusterItemsFromPairs(numericPairs);
           if (validClusters.length === 0) return '未发现高重复性的内容';
           let report = `共发现 ${validClusters.length} 组高重复性的内容:`;
           validClusters.forEach(cluster => { report += `\n- ${cluster.sort((a, b) => a - b).join('|')}` });

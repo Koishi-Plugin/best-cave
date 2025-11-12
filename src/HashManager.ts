@@ -3,7 +3,7 @@ import { Config, CaveObject } from './index';
 import Jimp from 'jimp';
 import { FileManager } from './FileManager';
 import * as crypto from 'crypto';
-import { requireAdmin, DSU, generateFromLSH } from './Utils';
+import { clusterItemsFromPairs, generateFromLSH } from './Utils';
 
 /**
  * @description 数据库 `cave_hash` 表的完整对象模型。
@@ -164,16 +164,8 @@ export class HashManager {
           if (textPairs.length === 0 && imagePairs.length === 0) return '未发现高相似度的内容';
           const generateReportForType = (pairs: { id1: number, id2: number, similarity: number }[]): { reportLines: string[], clusters: number[][] } => {
             if (pairs.length === 0) return { reportLines: [], clusters: [] };
-            const dsu = new DSU();
-            const allIds = new Set<number>();
-            pairs.forEach(p => { dsu.union(p.id1, p.id2); allIds.add(p.id1); allIds.add(p.id2); });
-            const clusterMap = new Map<number, number[]>();
-            allIds.forEach(id => {
-              const root = dsu.find(id);
-              if (!clusterMap.has(root)) clusterMap.set(root, []);
-              clusterMap.get(root)!.push(id);
-            });
-            const validClusters = Array.from(clusterMap.values()).filter(c => c.length > 1);
+            const numericPairs: [number, number][] = pairs.map(p => [p.id1, p.id2]);
+            const validClusters = clusterItemsFromPairs(numericPairs);
             const reportLines: string[] = [];
             validClusters.forEach(cluster => {
               const sortedCluster = cluster.sort((a, b) => a - b);
@@ -341,12 +333,12 @@ export class HashManager {
   }
 
   /**
-   * @description 计算两个十六进制哈希字符串之间的汉明距离 (不同位的数量)。
+   * @description 根据汉明距离计算相似度百分比。
    * @param hex1 - 第一个哈希。
    * @param hex2 - 第二个哈希。
-   * @returns 汉明距离。
+   * @returns 相似度 (0-100)。
    */
-  public calculateHammingDistance(hex1: string, hex2: string): number {
+  public calculateSimilarity(hex1: string, hex2: string): number {
     let distance = 0;
     let bin1 = '';
     for (const char of hex1) bin1 += parseInt(char, 16).toString(2).padStart(4, '0');
@@ -354,17 +346,6 @@ export class HashManager {
     for (const char of hex2) bin2 += parseInt(char, 16).toString(2).padStart(4, '0');
     const len = Math.min(bin1.length, bin2.length);
     for (let i = 0; i < len; i++) if (bin1[i] !== bin2[i]) distance++;
-    return distance;
-  }
-
-  /**
-   * @description 根据汉明距离计算相似度百分比。
-   * @param hex1 - 第一个哈希。
-   * @param hex2 - 第二个哈希。
-   * @returns 相似度 (0-100)。
-   */
-  public calculateSimilarity(hex1: string, hex2: string): number {
-    const distance = this.calculateHammingDistance(hex1, hex2);
     const hashLength = Math.max(hex1.length, hex2.length) * 4;
     return hashLength === 0 ? 100 : (1 - (distance / hashLength)) * 100;
   }

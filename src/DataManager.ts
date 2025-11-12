@@ -1,7 +1,6 @@
 import { Context, Logger } from 'koishi';
 import { FileManager } from './FileManager';
 import { CaveObject, Config } from './index';
-import { requireAdmin } from './Utils';
 
 /**
  * @class DataManager
