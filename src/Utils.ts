@@ -131,41 +131,6 @@ export async function buildCaveMessage(cave: CaveObject, config: Config, fileMan
 }
 
 /**
- * @description 清理数据库中标记为 'delete' 状态的回声洞及其关联文件和哈希。
- * @param ctx Koishi 上下文。
- * @param fileManager 文件管理器实例。
- * @param logger 日志记录器实例。
- * @param reusableIds 可复用 ID 的内存缓存。
- */
-export async function cleanupPendingDeletions(ctx: Context, config: Config, fileManager: FileManager, logger: Logger, reusableIds: Set<number>): Promise<void> {
-  try {
-    const cavesToDelete = await ctx.database.get('cave', { status: 'delete' });
-    if (!cavesToDelete.length) return;
-    const idsToDelete = cavesToDelete.map(c => c.id);
-    for (const cave of cavesToDelete) await Promise.all(cave.elements.filter(el => el.file).map(el => fileManager.deleteFile(el.file)));
-    reusableIds.delete(0);
-    idsToDelete.forEach(id => reusableIds.add(id));
-    await ctx.database.remove('cave', { id: { $in: idsToDelete } });
-    await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
-    if (config.enableAI) await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
-  } catch (error) {
-    logger.error('清理回声洞时发生错误:', error);
-  }
-}
-
-/**
- * @description 根据配置和会话，生成数据库查询的范围条件。
- * @param session 当前会话。
- * @param config 插件配置。
- * @param includeStatus 是否包含 status: 'active' 条件，默认为 true。
- * @returns 数据库查询条件对象。
- */
-export function getScopeQuery(session: Session, config: Config, includeStatus = true): object {
-  const baseQuery = includeStatus ? { status: 'active' as const } : {};
-  return config.perChannel && session.channelId ? { ...baseQuery, channelId: session.channelId } : baseQuery;
-}
-
-/**
  * @description 获取下一个可用的回声洞 ID，采用“回收ID > 扫描空缺 > 最大ID+1”策略。
  * @param ctx Koishi 上下文。
  * @param reusableIds 可复用 ID 的内存缓存。
@@ -476,7 +441,6 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
       if (checkResult.duplicate) {
         await session.send(`回声洞（${newId}）添加失败：${checkResult.message}`);
         await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-        await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
         return;
       }
       textHashesToStore = checkResult.textHashesToStore || [];
@@ -493,7 +457,6 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
         if (duplicateIds?.length > 0) {
           await session.send(`回声洞（${newId}）添加失败：内容与回声洞（${duplicateIds.join('|')}）重复`);
           await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-          await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
           return;
         }
       }
@@ -513,7 +476,6 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
         } else {
           await session.send(`回声洞（${newId}）添加失败：AI 审核未通过 (评分: ${analysisResult.rating})`);
           await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-          await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
           return;
         }
       } else {
@@ -525,7 +487,6 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
   } catch (error) {
     logger.error(`回声洞（${newId}）处理失败:`, error);
     await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-    await cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
     await session.send(`回声洞（${newId}）处理失败: ${error.message}`);
   }
 }

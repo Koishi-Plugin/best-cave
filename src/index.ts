@@ -5,7 +5,7 @@ import { DataManager } from './DataManager'
 import { PendManager } from './PendManager'
 import { HashManager, CaveHashObject } from './HashManager'
 import { AIManager, CaveMetaObject } from './AIManager'
-import * as utils from './Utils' // 确保这里引入了所有 utils 函数
+import * as utils from './Utils'
 
 export const name = 'best-cave'
 export const inject = ['database']
@@ -202,21 +202,27 @@ export function apply(ctx: Context, config: Config) {
   const fileManager = new FileManager(ctx.baseDir, config, logger);
   const reusableIds = new Set<number>();
   const profileManager = config.enableName ? new NameManager(ctx) : null;
-  const reviewManager = config.enablePend ? new PendManager(ctx, config, fileManager, logger, reusableIds) : null;
+  const reviewManager = config.enablePend ? new PendManager(ctx, config, fileManager, logger) : null;
   const hashManager = config.enableSimilarity ? new HashManager(ctx, config, logger, fileManager) : null;
   const dataManager = config.enableIO ? new DataManager(ctx, config, fileManager, logger) : null;
   const aiManager = config.enableAI ? new AIManager(ctx, config, logger, fileManager) : null;
 
-  ctx.on('ready', async () => {
+  ctx.on('dispose', async () => {
     try {
-      const staleCaves = await ctx.database.get('cave', { status: 'preload' });
-      if (staleCaves.length > 0) {
-        const idsToMark = staleCaves.map(c => ({ id: c.id, status: 'delete' as const }));
-        await ctx.database.upsert('cave', idsToMark);
-        await utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
+      const cavesMarkedForDelete = await ctx.database.get('cave', { status: 'delete' });
+      const stalePreloadCaves = await ctx.database.get('cave', { status: 'preload' });
+      const cavesToCleanup = [...cavesMarkedForDelete, ...stalePreloadCaves];
+      if (cavesToCleanup.length > 0) {
+        const idsToDelete = cavesToCleanup.map(c => c.id);
+        for (const cave of cavesToCleanup) await Promise.all(cave.elements.filter(el => el.file).map(el => fileManager.deleteFile(el.file)));
+        reusableIds.delete(0);
+        idsToDelete.forEach(id => reusableIds.add(id));
+        await ctx.database.remove('cave', { id: { $in: idsToDelete } });
+        await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
+        if (config.enableAI) await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
       }
     } catch (error) {
-      logger.error('清理残留回声洞时发生错误:', error);
+      logger.error('清理回声洞出错:', error);
     }
   });
 
@@ -232,7 +238,7 @@ export function apply(ctx: Context, config: Config) {
       if (options.delete) return session.execute(`cave.del ${options.delete}`);
       if (options.list) return session.execute('cave.list');
       try {
-        const query = utils.getScopeQuery(session, config);
+        const query = config.perChannel && session.channelId ? { status: 'active' as const, channelId: session.channelId } : { status: 'active' as const };
         const candidates = await ctx.database.get('cave', query, { fields: ['id'] });
         if (!candidates.length) return `当前${config.perChannel && session.channelId ? '本群' : ''}还没有任何回声洞`;
         const randomId = candidates[Math.floor(Math.random() * candidates.length)].id;
@@ -278,7 +284,8 @@ export function apply(ctx: Context, config: Config) {
     .action(async ({ session }, id) => {
       if (!id) return '请输入要查看的回声洞序号';
       try {
-        const [targetCave] = await ctx.database.get('cave', { ...utils.getScopeQuery(session, config), id });
+        const scopeQuery = config.perChannel && session.channelId ? { status: 'active' as const, channelId: session.channelId } : { status: 'active' as const };
+        const [targetCave] = await ctx.database.get('cave', { ...scopeQuery, id });
         if (!targetCave) return `回声洞（${id}）不存在`;
         const messages = await utils.buildCaveMessage(targetCave, config, fileManager, logger, session.platform);
         for (const message of messages) if (message.length > 0) await session.send(h.normalize(message));
@@ -300,7 +307,6 @@ export function apply(ctx: Context, config: Config) {
         await ctx.database.upsert('cave', [{ id, status: 'delete' }]);
         const caveMessages = await utils.buildCaveMessage(targetCave, config, fileManager, logger, session.platform, '已删除');
         for (const message of caveMessages) if (message.length > 0) await session.send(h.normalize(message));
-        utils.cleanupPendingDeletions(ctx, config, fileManager, logger, reusableIds);
       } catch (error) {
         logger.error(`标记回声洞（${id}）失败:`, error);
         return '删除失败，请稍后再试';
@@ -312,8 +318,7 @@ export function apply(ctx: Context, config: Config) {
     .option('all', '-a 查看排行')
     .action(async ({ session, options }) => {
       if (options.all) {
-        const adminError = utils.requireAdmin(session, config);
-        if (adminError) return adminError;
+        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
         try {
           const aggregatedStats = await ctx.database.select('cave', { status: 'active' })
             .groupBy(['userId', 'userName'], { count: row => $.count(row.id) }).execute();
@@ -340,7 +345,8 @@ export function apply(ctx: Context, config: Config) {
       }
       const targetUserId = options.user || session.userId;
       const isQueryingSelf = !options.user;
-      const query = { ...utils.getScopeQuery(session, config), userId: targetUserId };
+      const scopeQuery = config.perChannel && session.channelId ? { status: 'active' as const, channelId: session.channelId } : { status: 'active' as const };
+      const query = { ...scopeQuery, userId: targetUserId };
       const userCaves = await ctx.database.get('cave', query);
       if (!userCaves.length) return isQueryingSelf ? '你还没有投稿过回声洞' : `用户 ${targetUserId} 还没有投稿过回声洞`;
       const caveIds = userCaves.map(c => c.id).sort((a, b) => a - b).join('|');

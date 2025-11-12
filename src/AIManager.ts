@@ -38,7 +38,7 @@ export class AIManager {
   /**
    * @description 用于查重的 AI 系统提示词。
    */
-  private readonly DUPLICATE_SYSTEM_PROMPT = `你需要比较给定的“新内容”与“候选内容”，判断是否内容近似或仅存在细微差异。
+  private readonly DUPLICATE_SYSTEM_PROMPT = `你需要比较给定的“新内容”与“候选内容”，判断是否在核心主旨上近似，忽略非关键元素的差异。
 你的回复必须且只能是一个JSON数组，严禁含有注释说明等其他文字，只包含与新内容重复的候选内容的ID，例: [1, 2]或[]（若无重复）`;
 
   /**
@@ -74,7 +74,7 @@ export class AIManager {
     cave.subcommand('.ai', '分析回声洞', { hidden: true, authority: 4 })
       .usage('分析尚未分析的回声洞，补全回声洞记录。')
       .action(async ({ session }) => {
-        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
         try {
           const allCaves = await this.ctx.database.get('cave', { status: 'active' });
           const analyzedCaveIds = new Set((await this.ctx.database.get('cave_meta', {}, { fields: ['cave'] })).map(meta => meta.cave));
@@ -112,7 +112,7 @@ export class AIManager {
     cave.subcommand('.compare', '比较重复性', { hidden: true })
       .usage('检查回声洞，找出可能重复的内容。')
       .action(async ({ session }) => {
-        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
         await session.send('正在检查，请稍候...');
         try {
           const allMeta = await this.ctx.database.get('cave_meta', {});
@@ -195,7 +195,7 @@ export class AIManager {
       .option('less', '-l <rating:number> 显示上限')
       .option('pending', '-p 查询待审核回声洞')
       .action(async ({ session, options }) => {
-        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
         try {
           const statusToQuery = options.pending ? 'pending' : 'active';
           const caves = await this.ctx.database.get('cave', { status: statusToQuery }, { fields: ['id'] });

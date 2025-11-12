@@ -52,7 +52,7 @@ export class HashManager {
     cave.subcommand('.hash', '校验回声洞', { hidden: true, authority: 3 })
       .usage('校验缺失哈希的回声洞，补全哈希记录。')
       .action(async ({ session }) => {
-        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
         try {
           const allCaves = await this.ctx.database.get('cave', { status: 'active' });
           const existingHashes = await this.ctx.database.get('cave_hash', {}, { fields: ['cave'] });
@@ -115,7 +115,7 @@ export class HashManager {
       .option('textThreshold', '-t <threshold:number> 文本相似度阈值 (%)')
       .option('imageThreshold', '-i <threshold:number> 图片相似度阈值 (%)')
       .action(async ({ session, options }) => {
-        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
         await session.send('正在检查，请稍候...');
         try {
           const textThreshold = options.textThreshold ?? this.config.textThreshold;
@@ -208,7 +208,7 @@ export class HashManager {
     cave.subcommand('.fix [...ids:posint]', '修复回声洞', { hidden: true, authority: 3 })
       .usage('扫描并修复回声洞中的图片，可指定一个或多个 ID。')
       .action(async ({ session }, ...ids: number[]) => {
-        if (requireAdmin(session, this.config)) return requireAdmin(session, this.config);
+        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
         let cavesToProcess: CaveObject[];
         try {
           await session.send('正在修复，请稍候...');

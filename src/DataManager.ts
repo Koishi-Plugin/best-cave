@@ -28,9 +28,7 @@ export class DataManager {
    */
   public registerCommands(cave) {
     const commandAction = (action: () => Promise<string>) => async ({ session }) => {
-      const adminError = requireAdmin(session, this.config);
-      if (adminError) return adminError;
-
+      if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
       try {
         await session.send('正在处理，请稍候...');
         return await action();
