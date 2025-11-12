@@ -185,6 +185,30 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description("存储配置"),
 ]);
 
+/**
+ * @description 执行清理任务，删除传入的回声洞对象及其关联数据。
+ * @param ctx Koishi 上下文。
+ * @param fileManager 文件管理器实例。
+ * @param reusableIds 可复用 ID 的内存缓存。
+ * @param config 插件配置。
+ * @param logger 日志记录器实例。
+ * @param cavesToCleanup 需要被清理的回声洞对象数组。
+ */
+async function cleanupCaves(ctx: Context, fileManager: FileManager, reusableIds: Set<number>, config: Config, logger: Logger, cavesToCleanup: CaveObject[]) {
+  if (cavesToCleanup.length === 0) return;
+  try {
+    const idsToDelete = cavesToCleanup.map(c => c.id);
+    for (const cave of cavesToCleanup) await Promise.all(cave.elements.filter(el => el.file).map(el => fileManager.deleteFile(el.file)));
+    reusableIds.delete(0);
+    idsToDelete.forEach(id => reusableIds.add(id));
+    await ctx.database.remove('cave', { id: { $in: idsToDelete } });
+    if (config.enableSimilarity) await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
+    if (config.enableAI) await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
+  } catch (error) {
+    logger.error('清理回声洞出错:', error);
+  }
+}
+
 export function apply(ctx: Context, config: Config) {
   ctx.model.extend('cave', {
     id: 'unsigned',
@@ -207,23 +231,17 @@ export function apply(ctx: Context, config: Config) {
   const dataManager = config.enableIO ? new DataManager(ctx, config, fileManager, logger) : null;
   const aiManager = config.enableAI ? new AIManager(ctx, config, logger, fileManager) : null;
 
+  const cleanupInterval = ctx.setInterval(async () => {
+    const cavesToDelete = await ctx.database.get('cave', { status: 'delete' });
+    await cleanupCaves(ctx, fileManager, reusableIds, config, logger, cavesToDelete);
+  }, 60 * 60 * 1000);
+
   ctx.on('dispose', async () => {
-    try {
-      const cavesMarkedForDelete = await ctx.database.get('cave', { status: 'delete' });
-      const stalePreloadCaves = await ctx.database.get('cave', { status: 'preload' });
-      const cavesToCleanup = [...cavesMarkedForDelete, ...stalePreloadCaves];
-      if (cavesToCleanup.length > 0) {
-        const idsToDelete = cavesToCleanup.map(c => c.id);
-        for (const cave of cavesToCleanup) await Promise.all(cave.elements.filter(el => el.file).map(el => fileManager.deleteFile(el.file)));
-        reusableIds.delete(0);
-        idsToDelete.forEach(id => reusableIds.add(id));
-        await ctx.database.remove('cave', { id: { $in: idsToDelete } });
-        if (config.enableSimilarity) await ctx.database.remove('cave_hash', { cave: { $in: idsToDelete } });
-        if (config.enableAI) await ctx.database.remove('cave_meta', { cave: { $in: idsToDelete } });
-      }
-    } catch (error) {
-      logger.error('清理回声洞出错:', error);
-    }
+    cleanupInterval();
+    const cavesMarkedForDelete = await ctx.database.get('cave', { status: 'delete' });
+    const stalePreloadCaves = await ctx.database.get('cave', { status: 'preload' });
+    const allCavesToCleanup = [...cavesMarkedForDelete, ...stalePreloadCaves];
+    await cleanupCaves(ctx, fileManager, reusableIds, config, logger, allCavesToCleanup);
   });
 
   const cave = ctx.command('cave', '回声洞')
