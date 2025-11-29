@@ -336,7 +336,7 @@ export function apply(ctx: Context, config: Config) {
     .option('all', '-a 查看排行')
     .action(async ({ session, options }) => {
       if (options.all) {
-        if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
+        if (session.cid !== config.adminChannel) return '此指令仅限在管理群组中使用';
         try {
           const aggregatedStats = await ctx.database.select('cave', { status: 'active' })
             .groupBy(['userId', 'userName'], { count: row => $.count(row.id) }).execute();

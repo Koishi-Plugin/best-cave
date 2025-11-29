@@ -359,27 +359,50 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
         });
         initialDownloads.push(...await Promise.all(downloadPromises));
     }
-    const hashToCanonicalFile = new Map<string, string>();
-    const canonicalFilesToSave = new Map<string, Buffer>();
+    interface ProcessedMedia { fileName: string; buffer: Buffer; hash?: string }
+    const mediaForProcessing: ProcessedMedia[] = [];
     const fileRemapping = new Map<string, string>();
-    const mediaForProcessing: { fileName: string, buffer: Buffer }[] = [];
+    const canonicalFilesToSave = new Map<string, Buffer>();
     if (hashManager) {
-        for (const download of initialDownloads) {
-            if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(download.candidateFile).toLowerCase())) download.buffer = hashManager.sanitizeImageBuffer(download.buffer);
-            const hash = await hashManager.generatePHash(download.buffer);
-            if (hashToCanonicalFile.has(hash)) {
-                fileRemapping.set(download.candidateFile, hashToCanonicalFile.get(hash)!);
-            } else {
-                hashToCanonicalFile.set(hash, download.candidateFile);
-                canonicalFilesToSave.set(download.candidateFile, download.buffer);
-                fileRemapping.set(download.candidateFile, download.candidateFile);
-                mediaForProcessing.push({ fileName: download.candidateFile, buffer: download.buffer });
+        const hashToCanonicalFile = new Map<string, string>();
+        const hashableExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.gif'];
+        const sanitizableExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+        for (const { candidateFile, buffer } of initialDownloads) {
+            const ext = path.extname(candidateFile).toLowerCase();
+            let finalBuffer = buffer;
+            let hash: string | undefined;
+            if (hashableExtensions.includes(ext)) {
+                try {
+                    hash = await hashManager.generatePHash(finalBuffer);
+                } catch {
+                    if (sanitizableExtensions.includes(ext)) {
+                        try {
+                            const sanitized = hashManager.sanitizeImageBuffer(finalBuffer);
+                            if (!sanitized.equals(finalBuffer)) {
+                                finalBuffer = sanitized;
+                                hash = await hashManager.generatePHash(finalBuffer);
+                            }
+                        } catch (e) {
+                            logger.warn(`图片修复失败 (${candidateFile}): ${e.message}`);
+                        }
+                    }
+                }
             }
+            if (hash && hashToCanonicalFile.has(hash)) {
+                fileRemapping.set(candidateFile, hashToCanonicalFile.get(hash)!);
+                continue;
+            }
+            if (hash) hashToCanonicalFile.set(hash, candidateFile);
+            canonicalFilesToSave.set(candidateFile, finalBuffer);
+            fileRemapping.set(candidateFile, candidateFile);
+            mediaForProcessing.push({ fileName: candidateFile, buffer: finalBuffer, hash });
         }
         newCave.elements.forEach(el => { if (el.file && fileRemapping.has(el.file)) el.file = fileRemapping.get(el.file) });
     } else {
-        initialDownloads.forEach(d => canonicalFilesToSave.set(d.candidateFile, d.buffer));
-        mediaForProcessing.push(...initialDownloads.map(d => ({ fileName: d.candidateFile, buffer: d.buffer })));
+        initialDownloads.forEach(d => {
+            canonicalFilesToSave.set(d.candidateFile, d.buffer);
+            mediaForProcessing.push({ fileName: d.candidateFile, buffer: d.buffer });
+        });
     }
     let textHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
     let imageHashesToStore: Omit<CaveHashObject, 'cave'>[] = [];
@@ -401,23 +424,22 @@ export async function processNewCave(ctx: Context, config: Config, fileManager: 
             textHashesToStore.push({ hash: newSimhash, type: 'text' });
           }
         }
-        if (mediaForProcessing.length > 0) {
+        const imagesWithHash = mediaForProcessing.filter(m => m.hash !== undefined);
+        if (imagesWithHash.length > 0) {
           const dbImageHashes = await ctx.database.get('cave_hash', { type: 'image' });
           const newImageHashes = new Set<string>();
-          for (const media of mediaForProcessing) {
-            if (['.png', '.jpg', '.jpeg', '.webp'].includes(path.extname(media.fileName).toLowerCase())) {
-              const imageHash = await hashManager.generatePHash(media.buffer);
-              if (newImageHashes.has(imageHash)) continue;
-              for (const existing of dbImageHashes) {
-                const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
-                if (similarity >= config.imageThreshold) {
-                  await session.send(`回声洞（${newId}）添加失败：图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值`);
-                  await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
-                  return;
-                }
+          for (const media of imagesWithHash) {
+            const imageHash = media.hash!;
+            if (newImageHashes.has(imageHash)) continue;
+            for (const existing of dbImageHashes) {
+              const similarity = hashManager.calculateSimilarity(imageHash, existing.hash);
+              if (similarity >= config.imageThreshold) {
+                await session.send(`回声洞（${newId}）添加失败：图片与回声洞（${existing.cave}）的相似度（${similarity.toFixed(2)}%）超过阈值`);
+                await ctx.database.upsert('cave', [{ id: newId, status: 'delete' }]);
+                return;
               }
-              newImageHashes.add(imageHash);
             }
+            newImageHashes.add(imageHash);
           }
           imageHashesToStore = Array.from(newImageHashes).map(hash => ({ hash, type: 'image' }));
         }
