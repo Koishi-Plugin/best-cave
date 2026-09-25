@@ -247,7 +247,7 @@ export function apply(ctx: Context, config: Config) {
   const cave = ctx.command('cave', '回声洞')
     .option('add', '-a [content:text] 添加回声洞')
     .option('view', '-g [id:posint] 查看指定回声洞')
-    .option('delete', '-r [id:posint] 删除指定回声洞')
+    .option('delete', '-r [ids:text] 删除指定回声洞')
     .option('list', '-l 查询投稿统计')
     .usage('随机抽取一条已添加的回声洞。')
     .action(async ({ session, options }) => {
@@ -313,25 +313,31 @@ export function apply(ctx: Context, config: Config) {
       }
     });
 
-  cave.subcommand('.del <id:posint>', '删除指定回声洞')
-    .action(async ({ session }, id) => {
-      if (!id) return '请输入要删除的回声洞序号';
+  cave.subcommand('.del [...ids:posint]', '删除指定回声洞')
+    .usage('删除一个或多个指定序号的回声洞。')
+    .action(async ({ session }, ...ids: number[]) => {
+      if (ids.length === 0) return '请输入要删除的回声洞序号';
       try {
-        const [targetCave] = await ctx.database.get('cave', { id, status: 'active' });
-        if (!targetCave) return `回声洞（${id}）不存在`;
-        const isAuthor = targetCave.userId === session.userId;
         const isAdmin = session.cid === config.adminChannel;
-        if (!isAuthor && !isAdmin) return '你没有权限删除这条回声洞';
-        await ctx.database.upsert('cave', [{ id, status: 'delete' }]);
-        const caveMessages = await utils.buildCaveMessage(targetCave, config, fileManager, logger, session.platform, '已删除');
-        for (const message of caveMessages) if (message.length > 0) await session.send(h.normalize(message));
+        const targetCaves = await ctx.database.get('cave', { id: { $in: ids }, status: 'active' });
+        const cavesToDelete = isAdmin ? targetCaves : targetCaves.filter(cave => cave.userId === session.userId);
+        if (cavesToDelete.length === 0) return `回声洞（${ids.join('|')}）不存在`;
+        const processedIds = cavesToDelete.map(cave => cave.id);
+        await ctx.database.upsert('cave', processedIds.map(id => ({ id, status: 'delete' })));
+        for (const cave of cavesToDelete) {
+          const caveMessages = await utils.buildCaveMessage(cave, config, fileManager, logger, session.platform, '已删除');
+          for (const message of caveMessages) if (message.length > 0) await session.send(h.normalize(message));
+        }
+        const missedIds = ids.filter(id => !processedIds.includes(id));
+        if (missedIds.length > 0) return `回声洞（${missedIds.join('|')}）不存在`;
       } catch (error) {
-        logger.error(`标记回声洞（${id}）失败:`, error);
+        logger.error(`标记回声洞（${ids.join('|')}）失败:`, error);
         return '删除失败，请稍后再试';
       }
     });
 
   cave.subcommand('.list', '查询投稿统计')
+    .usage('查询排行或指定用户的回声洞统计。')
     .option('user', '-u <user:user> 指定用户')
     .option('all', '-a 查看排行')
     .action(async ({ session, options }) => {
