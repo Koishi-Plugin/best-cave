@@ -1,7 +1,7 @@
 import { Context, h, Logger } from 'koishi';
 import { CaveObject, Config } from './index';
 import { FileManager } from './FileManager';
-import { buildCaveMessage } from './Utils';
+import { buildCaveMessage, parseCaveIds } from './Utils';
 
 /**
  * @class PendManager
@@ -43,10 +43,11 @@ export class PendManager {
         if (!pendingCaves.length) return '当前没有需要审核的回声洞';
         return `当前共有 ${pendingCaves.length} 条待审核回声洞，序号为：\n${pendingCaves.map(c => c.id).join('|')}`;
       });
-    const createPendAction = (actionType: 'approve' | 'reject') => async ({ session }, ...ids: number[]) => {
+    const createPendAction = (actionType: 'approve' | 'reject') => async ({ session }, ...args: string[]) => {
       if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
+      const { ids, invalid } = parseCaveIds(args);
       let idsToProcess = ids;
-      if (idsToProcess.length === 0) {
+      if (args.length === 0) {
         const pendingCaves = await this.ctx.database.get('cave', { status: 'pending' }, { fields: ['id'] });
         if (!pendingCaves.length) return '当前没有需要审核的回声洞';
         idsToProcess = pendingCaves.map(c => c.id);
@@ -54,8 +55,8 @@ export class PendManager {
       try {
         const targetStatus = actionType === 'approve' ? 'active' : 'delete';
         const actionText = actionType === 'approve' ? '通过' : '拒绝';
-        const cavesToProcess = await this.ctx.database.get('cave', { id: { $in: idsToProcess }, status: 'pending' });
-        if (cavesToProcess.length === 0) return `回声洞（${idsToProcess.join('|')}）无需审核或不存在`;
+        const cavesToProcess = idsToProcess.length === 0 ? [] : await this.ctx.database.get('cave', { id: { $in: idsToProcess }, status: 'pending' });
+        if (cavesToProcess.length === 0) return `回声洞（${[...invalid, ...idsToProcess].join('|')}）无需审核或不存在`;
         const processedIds = cavesToProcess.map(cave => cave.id);
         await this.ctx.database.upsert('cave', processedIds.map(id => ({ id, status: targetStatus })));
         return `已${actionText}回声洞（${processedIds.join('|')}）`;
@@ -64,11 +65,11 @@ export class PendManager {
         return `操作失败: ${error.message}`;
       }
     };
-    pend.subcommand('.Y [...ids:posint]', '通过审核')
-      .usage('通过一个或多个指定 ID 的回声洞审核。若不指定 ID，则通过所有待审核的回声洞。')
+    pend.subcommand('.Y [...ids:string]', '通过审核')
+      .usage('通过一个或多个指定 ID 的回声洞审核，序号之间以空格或 | 分隔。若不指定 ID，则通过所有待审核的回声洞。')
       .action(createPendAction('approve'));
-    pend.subcommand('.N [...ids:posint]', '拒绝审核')
-      .usage('拒绝一个或多个指定 ID 的回声洞审核。若不指定 ID，则拒绝所有待审核的回声洞。')
+    pend.subcommand('.N [...ids:string]', '拒绝审核')
+      .usage('拒绝一个或多个指定 ID 的回声洞审核，序号之间以空格或 | 分隔。若不指定 ID，则拒绝所有待审核的回声洞。')
       .action(createPendAction('reject'));
     if (this.config.enableAI) {
       pend.subcommand('.A <threshold:number>', '自动通过审核')

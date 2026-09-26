@@ -3,7 +3,7 @@ import { Config, CaveObject } from './index';
 import Jimp from 'jimp';
 import { FileManager } from './FileManager';
 import * as crypto from 'crypto';
-import { clusterItemsFromPairs, generateFromLSH } from './Utils';
+import { clusterItemsFromPairs, generateFromLSH, parseCaveIds } from './Utils';
 
 /**
  * @description 数据库 `cave_hash` 表的完整对象模型。
@@ -197,17 +197,18 @@ export class HashManager {
         }
       });
 
-    cave.subcommand('.fix [...ids:posint]', '修复回声洞', { hidden: true, authority: 3 })
-      .usage('扫描并修复回声洞中的图片，可指定一个或多个 ID。')
-      .action(async ({ session }, ...ids: number[]) => {
+    cave.subcommand('.fix [...ids:string]', '修复回声洞', { hidden: true, authority: 3 })
+      .usage('扫描并修复回声洞中的图片，可指定一个或多个 ID，序号之间以空格或 | 分隔。')
+      .action(async ({ session }, ...args: string[]) => {
         if (session.cid !== this.config.adminChannel) return '此指令仅限在管理群组中使用';
+        const { ids } = parseCaveIds(args);
         let cavesToProcess: CaveObject[];
         try {
           await session.send('正在修复，请稍候...');
-          if (ids.length === 0) {
+          if (args.length === 0) {
             cavesToProcess = await this.ctx.database.get('cave', { status: 'active' });
           } else {
-            cavesToProcess = await this.ctx.database.get('cave', { id: { $in: ids }, status: 'active' });
+            cavesToProcess = ids.length === 0 ? [] : await this.ctx.database.get('cave', { id: { $in: ids }, status: 'active' });
           }
           if (!cavesToProcess.length) return '无可修复的回声洞';
           let fixedFiles = 0;

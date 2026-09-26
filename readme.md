@@ -34,7 +34,7 @@
 | `cave` | | 随机查看一条回声洞。 |
 | `cave.add [内容]` | `cave -a [内容]` | 添加新的回声洞。可以直接跟文字，也可以**回复一条消息后发送 `cave.add`**，或等待机器人提示后发送。 |
 | `cave.view <序号>` | `cave -g <序号>` | 查看指定序号的回声洞。 |
-| `cave.del [...序号]` | `cave -r [...序号]` | 删除一个或多个指定序号的回声洞，序号之间以空格分隔。仅投稿人或在管理群组内的管理员可操作。 |
+| `cave.del [...序号]` | `cave -r [...序号]` | 删除一个或多个指定序号的回声洞，序号之间以空格或 `\|` 分隔（可直接粘贴 `cave.list` 的输出）。单条删除会回显被删内容，多条删除返回汇总行。仅投稿人或在管理群组内的管理员可操作。 |
 | `cave.list` | `cave -l` | 查询并列出自己投稿过的所有回声洞序号及总数。 |
 | | `-u <用户>` | 查询指定用户（需@或使用ID）投稿的所有回声洞。 |
 | | `-a` | **(仅限管理群组)** 查看所有用户的投稿数量排行榜。 |
@@ -48,14 +48,14 @@
 | `cave.name [昵称]` | `enableName: true` | **(用户指令)** 设置你在回声洞中显示的昵称。若不提供昵称，则清除现有设置。 |
 | `cave.pend` | `enablePend: true` | **(管理)** 列出所有待审核的回声洞ID。 |
 | `cave.pend <序号>` | `enablePend: true` | **(管理)** 查看指定待审核内容的详情。 |
-| `cave.pend.Y [...序号]` | `enablePend: true` | **(管理)** 通过审核。若不提供序号，则通过所有待审核内容。 |
-| `cave.pend.N [...序号]` | `enablePend: true` | **(管理)** 拒绝审核。若不提供序号，则拒绝所有待审核内容。 |
+| `cave.pend.Y [...序号]` | `enablePend: true` | **(管理)** 通过审核，序号之间以空格或 `\|` 分隔。若不提供序号，则通过所有待审核内容。 |
+| `cave.pend.N [...序号]` | `enablePend: true` | **(管理)** 拒绝审核，序号之间以空格或 `\|` 分隔。若不提供序号，则拒绝所有待审核内容。 |
 | `cave.pend.A <阈值>` | `enablePend: true`, `enableAI: true` | **(管理)** 根据 AI 评分自动通过审核，通过所有评分不低于指定阈值的内容。 |
 | `cave.export` | `enableIO: true` | **(管理)** 将所有`active`状态的回声洞导出到 `data/cave/cave.json`。 |
 | `cave.import` | `enableIO: true` | **(管理)** 从 `data/cave/cave.json` 文件中导入数据。 |
 | `cave.hash` | `enableSimilarity: true` | **(管理)** 校验所有历史数据，为缺失哈希的回声洞补全记录。 |
 | `cave.check` | `enableSimilarity: true` | **(管理)** 检查所有回声洞的哈希，生成一份关于文本和图片相似度的报告。 |
-| `cave.fix [...序号]` | `enableSimilarity: true`| **(管理)** 扫描并修复回声洞中的图片（移除多余数据）。可指定ID或扫描全部。 |
+| `cave.fix [...序号]` | `enableSimilarity: true`| **(管理)** 扫描并修复回声洞中的图片（移除多余数据）。可指定一个或多个序号（空格或 `\|` 分隔），不指定则扫描全部。 |
 | `cave.ai` | `enableAI: true` | **(管理)** 分析所有历史数据，为缺失AI元数据的回声洞补全记录。 |
 | `cave.compare` | `enableAI: true` | **(管理)** 检查所有回声洞的AI关键词，生成一份关于内容重复性的报告。 |
 | `cave.rank` | `enableAI: true` | **(管理)** 查询 AI 评分排行，支持 `-n` (数量), `-g` (下限), `-l` (上限), `-p` (查询待审核) 选项。 |

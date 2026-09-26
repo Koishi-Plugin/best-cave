@@ -313,25 +313,31 @@ export function apply(ctx: Context, config: Config) {
       }
     });
 
-  cave.subcommand('.del [...ids:posint]', '删除指定回声洞')
-    .usage('删除一个或多个指定序号的回声洞。')
-    .action(async ({ session }, ...ids: number[]) => {
-      if (ids.length === 0) return '请输入要删除的回声洞序号';
+  cave.subcommand('.del [...ids:string]', '删除指定回声洞')
+    .usage('删除一个或多个指定序号的回声洞，序号之间以空格或 | 分隔。')
+    .action(async ({ session }, ...args: string[]) => {
+      const { ids, invalid } = utils.parseCaveIds(args);
+      if (ids.length === 0 && invalid.length === 0) return '请输入要删除的回声洞序号';
       try {
         const isAdmin = session.cid === config.adminChannel;
-        const targetCaves = await ctx.database.get('cave', { id: { $in: ids }, status: 'active' });
+        const targetCaves = ids.length === 0 ? [] : await ctx.database.get('cave', { id: { $in: ids }, status: 'active' });
         const cavesToDelete = isAdmin ? targetCaves : targetCaves.filter(cave => cave.userId === session.userId);
-        if (cavesToDelete.length === 0) return `回声洞（${ids.join('|')}）不存在`;
-        const processedIds = cavesToDelete.map(cave => cave.id);
+        const deletableIds = new Set(cavesToDelete.map(cave => cave.id));
+        const processedIds = ids.filter(id => deletableIds.has(id));
+        if (processedIds.length === 0) return `回声洞（${[...invalid, ...ids].join('|')}）不存在`;
         await ctx.database.upsert('cave', processedIds.map(id => ({ id, status: 'delete' })));
-        for (const cave of cavesToDelete) {
-          const caveMessages = await utils.buildCaveMessage(cave, config, fileManager, logger, session.platform, '已删除');
+        const notes: string[] = [];
+        if (processedIds.length === 1) {
+          const caveMessages = await utils.buildCaveMessage(cavesToDelete.find(cave => cave.id === processedIds[0]), config, fileManager, logger, session.platform, '已删除');
           for (const message of caveMessages) if (message.length > 0) await session.send(h.normalize(message));
+        } else {
+          notes.push(`已删除回声洞（${processedIds.join('|')}）`);
         }
-        const missedIds = ids.filter(id => !processedIds.includes(id));
-        if (missedIds.length > 0) return `回声洞（${missedIds.join('|')}）不存在`;
+        const missedIds = [...invalid, ...ids.filter(id => !processedIds.includes(id))];
+        if (missedIds.length > 0) notes.push(`回声洞（${missedIds.join('|')}）不存在`);
+        if (notes.length > 0) return notes.join('\n');
       } catch (error) {
-        logger.error(`标记回声洞（${ids.join('|')}）失败:`, error);
+        logger.error(`标记回声洞（${args.join('|')}）失败:`, error);
         return '删除失败，请稍后再试';
       }
     });

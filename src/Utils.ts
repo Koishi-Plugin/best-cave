@@ -131,6 +131,18 @@ export async function buildCaveMessage(cave: CaveObject, config: Config, fileMan
 }
 
 /**
+ * @description 解析指令中的回声洞序号，兼容空格、| 与逗号等多种分隔写法。
+ * @param inputs 指令参数的原始值。
+ * @returns ids 为去重后的合法序号，invalid 为无法解析的原始片段。
+ */
+export function parseCaveIds(inputs: unknown[]): { ids: number[], invalid: string[] } {
+  const tokens = inputs.flatMap(item => `${item}`.split(/[|\s,，、]+/)).filter(Boolean) as string[];
+  const ids = tokens.filter(token => /^[1-9]\d*$/.test(token)).map(Number);
+  const invalid = tokens.filter(token => !/^[1-9]\d*$/.test(token));
+  return { ids: [...new Set(ids)], invalid };
+}
+
+/**
  * @description 获取下一个可用的回声洞 ID，采用“回收ID > 扫描空缺 > 最大ID+1”策略。
  * @param ctx Koishi 上下文。
  * @param reusableIds 可复用 ID 的内存缓存。
