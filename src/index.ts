@@ -327,11 +327,18 @@ export function apply(ctx: Context, config: Config) {
         if (processedIds.length === 0) return `回声洞（${[...invalid, ...ids].join('|')}）不存在`;
         await ctx.database.upsert('cave', processedIds.map(id => ({ id, status: 'delete' })));
         const notes: string[] = [];
-        if (processedIds.length === 1) {
-          const caveMessages = await utils.buildCaveMessage(cavesToDelete.find(cave => cave.id === processedIds[0]), config, fileManager, logger, session.platform, '已删除');
+        const orderedCaves = processedIds.map(id => cavesToDelete.find(cave => cave.id === id));
+        if (orderedCaves.length === 1) {
+          const caveMessages = await utils.buildCaveMessage(orderedCaves[0], config, fileManager, logger, session.platform, '已删除');
           for (const message of caveMessages) if (message.length > 0) await session.send(h.normalize(message));
         } else {
-          notes.push(`已删除回声洞（${processedIds.join('|')}）`);
+          const groupedMessages = await Promise.all(orderedCaves.map(async cave => {
+            const caveMessages = await utils.buildCaveMessage(cave, config, fileManager, logger, session.platform, '已删除');
+            const content = caveMessages.filter(message => message.length > 0).flatMap(message => h.normalize(message));
+            if (content.length === 0) return null;
+            return h('message', {}, [h('author', { id: cave.userId, name: cave.userName }), ...content]);
+          }));
+          await session.send(h('message', { forward: true }, groupedMessages.filter(Boolean)));
         }
         const missedIds = [...invalid, ...ids.filter(id => !processedIds.includes(id))];
         if (missedIds.length > 0) notes.push(`回声洞（${missedIds.join('|')}）不存在`);
