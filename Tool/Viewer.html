@@ -7,7 +7,7 @@
 <style>
 :root{
   --bg:#f2f3f5; --card:#fff; --ink:#1a2029; --muted:#6b7381; --line:#e0e4ea;
-  --accent:#2c66e0; --del:#cf2f43; --rev:#b0650f; --keep:#0f7a57; --chip:#edf0f5;
+  --accent:#2c66e0; --del:#cf2f43; --keep:#0f7a57; --chip:#edf0f5;
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif}
@@ -31,6 +31,11 @@ button:hover:not(:disabled){border-color:#aeb9cb;background:#f7f9fc}
 .ctl:has(input){flex:1 1 118px;min-width:104px}
 .ctl input{flex:1 1 auto}
 .grp{display:flex;flex:0 0 auto}
+.chk{display:inline-flex;align-items:center;gap:6px;flex:0 0 auto;height:31px;padding:0 11px;background:#fff;border:1px solid var(--line);border-radius:8px;
+  font-size:13.5px;color:var(--muted);cursor:pointer;white-space:nowrap;user-select:none}
+.chk:hover{border-color:#aeb9cb;background:#f7f9fc}
+.chk input{width:14px;height:14px;margin:0;accent-color:var(--accent);cursor:pointer}
+.chk:has(input:checked){color:var(--ink);border-color:#aeb9cb;background:#f2f6ff}
 .grp button{border-radius:0;border-right-width:0}
 .grp button:first-child{border-radius:8px 0 0 8px}
 .grp button:last-child{border-radius:0 8px 8px 0;border-right-width:1px}
@@ -48,7 +53,6 @@ main{padding:16px}
 .card.sel::after{content:"已选择";position:absolute;top:0;right:0;background:var(--accent);color:#fff;font-size:11.5px;line-height:1;padding:4px 9px;border-radius:0 10px 0 9px}
 .card.sel .h1{padding-right:58px}
 .card.v-del{border-top:4px solid var(--del)}
-.card.v-review{border-top:4px solid var(--rev)}
 .card.v-keep{border-top:4px solid var(--keep)}
 .hd{display:flex;flex-direction:column;gap:3px;padding:9px 12px;border-bottom:1px solid var(--line);background:#fafbfc;user-select:none}
 .h1{display:flex;align-items:baseline;gap:8px;min-width:0}
@@ -74,10 +78,10 @@ audio{width:100%}
 .chip.bad{background:#f4e3e5;color:#8f2b36}
 .none{font-size:13.5px;color:var(--muted);font-style:italic}
 
-.ft{border-top:1px dashed var(--line);padding:10px 12px;background:#fcfcfd;font-size:14px;line-height:1.65;overflow-wrap:anywhere}
-.ft .adv{color:#38414f}
-.ft .rsn{color:var(--muted)}
-.ft .adv + .rsn::before{content:"|";color:#b5bdca;margin:0 7px}
+.ft{border-top:1px dashed var(--line);padding:10px 12px;background:#fcfcfd;font-size:14px;line-height:1.85;overflow-wrap:anywhere}
+.ft .seg{display:block}
+.ft .cz{display:inline-block;font-size:12.5px;line-height:1;padding:4px 8px;border-radius:999px;background:var(--chip);color:#41506b;margin-right:7px;vertical-align:1px}
+.ft .cz.hit{background:#f4e3e5;color:#8f2b36}
 #more{display:flex;justify-content:center;padding:18px}
 .hint{font-size:13.5px;color:var(--muted)}
 
@@ -96,9 +100,9 @@ audio{width:100%}
   <h1>回声洞在线预览</h1>
   <span class="div"></span>
   <label class="ctl"><i>搜索</i><input type="search" id="q"></label>
-  <label class="ctl"><i>建议</i><select id="f-verdict"><option value="">全部</option></select></label>
   <label class="ctl"><i>群组</i><select id="f-ch"><option value="">全部</option></select></label>
-  <label class="ctl"><i>排序</i><select id="sort"><option value="id-asc">升序</option><option value="id-desc">降序</option><option value="sev">建议</option></select></label>
+  <label class="chk"><input type="checkbox" id="c-asc"><span>正序</span></label>
+  <label class="chk"><input type="checkbox" id="c-keep"><span>显示正常</span></label>
   <span class="spacer"></span>
   <span id="stat" class="stat"></span>
   <span class="div"></span>
@@ -117,14 +121,13 @@ audio{width:100%}
 
 <script data-cfasync="false">
 "use strict";
-const VLABEL = { keep: "保留", review: "待定", del: "删除" };
 const CHUNK = 50, PAGE = 100;
 const $ = s => document.querySelector(s);
 const cols = $("#cols"), more = $("#more"), stat = $("#stat");
 const lb = $("#lb"), lbBody = $("#lb-body"), lbCap = $("#lb-cap");
 
-let caves = [], analysis = new Map(), vcnt = { keep: 0, review: 0, del: 0 };
-let sel = new Set(), gone = new Set(), lastIdx = -1, view = [], shown = 0, byId = new Map();
+let caves = [], analysis = new Map(), vcnt = { del: 0, keep: 0 };
+let sel = new Set(), gone = new Set(), unfit = new Set(), lastIdx = -1, view = [], shown = 0, byId = new Map();
 let lbList = [], lbAt = 0, lbOwner = null;
 let base = "", files = null, unhandled = 0;
 const objUrls = new Map();
@@ -208,7 +211,7 @@ function normalize(c) {
 
 function applyData(data) {
   caves = data.map(normalize).sort((a, b) => a.id - b.id);
-  sel.clear(); gone.clear();
+  sel.clear(); gone.clear(); unfit.clear();
   const cnt = new Map();
   for (const c of caves) {
     const k = String(c.channelId);
@@ -217,44 +220,40 @@ function applyData(data) {
   const fc = $("#f-ch");
   fc.replaceChildren(new Option("全部", ""));
   for (const k of [...cnt.keys()].sort()) fc.append(new Option(k + " · " + cnt.get(k), k));
-  const fv = $("#f-verdict");
-  fv.replaceChildren(new Option("全部", ""), ...["del", "review", "keep"].map(k => new Option(VLABEL[k], k)));
   render();
 }
 
-function setAnalysis(obj) {
+function setAnalysis(arr) {
   analysis = new Map();
-  vcnt = { keep: 0, review: 0, del: 0 };
-  for (const it of (obj && obj.items) || []) {
-    const a = { verdict: it.verdict || "keep", reason: it.reason || "", advice: it.advice || "" };
-    analysis.set(it.id, a);
-    vcnt[a.verdict]++;
+  vcnt = { del: 0, keep: 0 };
+  for (const it of Array.isArray(arr) ? arr : []) {
+    analysis.set(it.id, { time: it.time || "", del: it.delete === true, reason: it.reason || "" });
+    vcnt[it.delete === true ? "del" : "keep"]++;
   }
   render();
 }
 
-const eff = id => analysis.get(id) || null;
-const verdict = c => (eff(c.id) || {}).verdict || "keep";
+const an = id => analysis.get(id) || null;
+const isDel = c => (an(c.id) || {}).del === true;
+const timeOk = c => { const a = an(c.id); return !!a && !!c.time && a.time === c.time; };
+const mediaOk = c => !c._media.some(e => !mediaUrl(e.file));
 
 /* ---------- 筛选 ---------- */
 
 function filtered() {
-  const q = $("#q").value.trim().toLowerCase(), fv = $("#f-verdict").value, fc = $("#f-ch").value;
+  const q = $("#q").value.trim().toLowerCase(), fc = $("#f-ch").value;
   const out = caves.filter(c => {
-    if (gone.has(c.id)) return false;
+    if (gone.has(c.id) || unfit.has(c.id)) return false;
+    if (!timeOk(c) || !mediaOk(c)) return false;
     if (fc && String(c.channelId) !== fc) return false;
-    if (fv && verdict(c) !== fv) return false;
+    if (!$("#c-keep").checked && !isDel(c)) return false;
     if (q) {
-      const a = eff(c.id) || {};
-      if (!(c._q.includes(q) || (a.reason || "").toLowerCase().includes(q) || (a.advice || "").toLowerCase().includes(q))) return false;
+      const a = an(c.id) || {};
+      if (!(c._q.includes(q) || (a.reason || "").toLowerCase().includes(q))) return false;
     }
     return true;
   });
-  if ($("#sort").value === "id-desc") out.reverse();
-  if ($("#sort").value === "sev") {
-    const rank = { del: 0, review: 1, keep: 2 };
-    out.sort((x, y) => rank[verdict(x)] - rank[verdict(y)] || y.id - x.id);
-  }
+  if (!$("#c-asc").checked) out.reverse();
   return out;
 }
 
@@ -320,8 +319,8 @@ const scheduleRelayout = debounce(260, () => { if (byId.size > colCount()) relay
 /* ---------- 卡片 ---------- */
 
 function card(c) {
-  const a = eff(c.id);
-  const box = el("article", "card" + (sel.has(c.id) ? " sel" : "") + (a ? " v-" + a.verdict : ""));
+  const a = an(c.id);
+  const box = el("article", "card" + (sel.has(c.id) ? " sel" : "") + (a.del ? " v-del" : " v-keep"));
   byId.set(c.id, box);
   const hd = el("div", "hd");
   const h1 = el("div", "h1");
@@ -331,7 +330,7 @@ function card(c) {
   if (c._time) h2.append(el("span", "", c._time.toLocaleString("zh-CN", { hour12: false, year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).replace(/\//g, "-")));
   hd.append(h1, h2);
   box.append(hd, body(c));
-  if (a && (a.reason || a.advice)) box.append(foot(a));
+  if (a.reason) box.append(foot(a));
   box.onclick = e => {
     if (e.target.closest("img,video,audio,a,button")) return;
     toggle(c, view.indexOf(c), e.shiftKey);
@@ -339,9 +338,23 @@ function card(c) {
   box.querySelectorAll("img,video").forEach(m => m.onclick = e => { e.stopPropagation(); openLb(c, m.dataset.file); });
   box.querySelectorAll("img").forEach(im => {
     if (!im.complete) im.addEventListener("load", scheduleRelayout, { once: true });
-    im.addEventListener("error", scheduleRelayout, { once: true });
+    im.addEventListener("error", () => dropCard(c.id), { once: true });
   });
   return box;
+}
+
+/* 媒体取不到的条目视同已删除：整条不显示，不保留空壳卡片 */
+function dropCard(id) {
+  if (unfit.has(id)) return;
+  unfit.add(id);
+  sel.delete(id);
+  byId.get(id)?.remove();
+  byId.delete(id);
+  view = view.filter(c => c.id !== id);
+  shown = Math.max(0, shown - 1);
+  lastIdx = -1;
+  paintStat();
+  scheduleRelayout();
 }
 
 function body(c) {
@@ -381,10 +394,8 @@ function textBlock(content) {
 }
 
 function mediaNode(e) {
-  const url = mediaUrl(e.file);
-  if (!url) return el("span", "chip bad", "媒体文件缺失");
   const node = el(e.type === "video" ? "video" : "img");
-  node.src = url; node.dataset.file = e.file;
+  node.src = mediaUrl(e.file); node.dataset.file = e.file;
   if (node.tagName === "VIDEO") { node.controls = true; node.preload = "metadata"; }
   else { node.loading = "lazy"; node.alt = e.file; }
   return node;
@@ -426,18 +437,29 @@ function fileBlock(e) {
 
 function foot(a) {
   const ft = el("div", "ft");
-  if (a.advice) ft.append(el("span", "adv", a.advice));
-  if (a.reason) ft.append(el("span", "rsn", a.reason));
+  for (const seg of String(a.reason).split("；")) {
+    const s = seg.trim();
+    if (!s) continue;
+    const row = el("div", "seg");
+    const at = s.indexOf("：");
+    if (at > 0 && at <= 5) {
+      row.append(el("span", "cz" + (a.del ? " hit" : ""), s.slice(0, at)));
+      row.append(document.createTextNode(s.slice(at + 1).trim()));
+    } else {
+      row.append(document.createTextNode(s));
+    }
+    ft.append(row);
+  }
   return ft;
 }
 
 function paintStat() {
   if (!caves.length) { stat.replaceChildren(); return; }
-  const hid = { keep: 0, review: 0, del: 0 };
-  for (const id of gone) { const a = eff(id); if (a) hid[a.verdict]++; }
+  const hid = { del: 0, keep: 0 };
+  for (const id of new Set([...gone, ...unfit])) { const a = an(id); if (a) hid[a.del ? "del" : "keep"]++; }
   const parts = [
     `已加载 ${shown} 条`, `共 ${view.length} 条`,
-    `${VLABEL.del} ${vcnt.del - hid.del}`, `待定 ${vcnt.review - hid.review}`, `已选择 ${sel.size} 条`
+    `删除 ${vcnt.del - hid.del}`, `保留 ${vcnt.keep - hid.keep}`, `已选择 ${sel.size} 条`
   ];
   if (gone.size) parts.push(`已隐藏 ${gone.size} 条`);
   if (analysis.size && analysis.size !== caves.length) parts.push(`已判定 ${analysis.size} 条`);
@@ -539,9 +561,14 @@ $("#i-dir").onchange = async e => {
   e.target.value = "";
   await useFolder(map);
 };
-for (const id of ["#f-verdict", "#f-ch", "#sort"]) $(id).onchange = render;
+$("#f-ch").onchange = render;
+for (const id of ["#c-asc", "#c-keep"]) $(id).onchange = render;
 $("#q").oninput = debounce(200, render);
-$("#b-clearf").onclick = () => { $("#q").value = ""; $("#f-verdict").value = ""; $("#f-ch").value = ""; gone.clear(); render(); };
+$("#b-clearf").onclick = () => {
+  $("#q").value = ""; $("#f-ch").value = "";
+  $("#c-asc").checked = false; $("#c-keep").checked = false;
+  gone.clear(); unfit.clear(); render();
+};
 $("#b-none").onclick = clearSel;
 $("#b-cmd").onclick = makeCmd;
 lb.onclick = e => { if (e.target === lb) closeLb(); };
